@@ -1,0 +1,36 @@
+{
+  "name": "@vedh/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "vedh": "./dist/bin.js"
+  },
+  "files": [
+    "dist",
+    "skill"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "engines": {
+    "node": "24.x"
+  },
+  "dependencies": {
+    "@usersatoshi/results": "^1.0.0",
+    "@vedh/core": "workspace:*",
+    "@vedh/extension-api": "workspace:*",
+    "@vedh/extension-js-ts": "workspace:*",
+    "@vedh/extension-php": "workspace:*",
+    "@vedh/extension-python": "workspace:*",
+    "@vedh/parser": "workspace:*",
+    "@vedh/mcp": "workspace:*",
+    "@vedh/viz": "workspace:*",
+    "commander": "^15.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
+}

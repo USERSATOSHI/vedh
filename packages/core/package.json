@@ -1,0 +1,37 @@
+{
+  "name": "@vedh/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "bun run build && node --test dist/indexer/index.test.js"
+  },
+  "engines": {
+    "node": "24.x"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  },
+  "dependencies": {
+    "@vedh/parser": "workspace:*",
+    "@vedh/types": "workspace:*",
+    "@usersatoshi/results": "^1.0.0",
+    "better-sqlite3": "^12.5.0",
+    "marked": "^18.0.5"
+  }
+}

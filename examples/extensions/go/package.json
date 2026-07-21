@@ -1,0 +1,26 @@
+{
+  "name": "@example/vedh-extension-go",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@vedh/extension-sdk": "workspace:*",
+    "tree-sitter": "^0.25.0",
+    "tree-sitter-go": "^0.25.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.0"
+  }
+}

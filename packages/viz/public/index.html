@@ -1,0 +1,341 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width,initial-scale=1,viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#0b0c0f" />
+    <title>Vedh graph</title>
+    <link rel="stylesheet" href="/assets/styles.css" />
+  </head>
+  <body>
+    <svg class="svg-sprite" aria-hidden="true">
+      <symbol id="i-panel-left" viewBox="0 0 24 24">
+        <rect x="3" y="4" width="18" height="16" rx="2" />
+        <path d="M9 4v16" />
+      </symbol>
+      <symbol id="i-panel-right" viewBox="0 0 24 24">
+        <rect x="3" y="4" width="18" height="16" rx="2" />
+        <path d="M15 4v16" />
+      </symbol>
+      <symbol id="i-search" viewBox="0 0 24 24">
+        <circle cx="11" cy="11" r="7" />
+        <path d="m20 20-4-4" />
+      </symbol>
+      <symbol id="i-filter" viewBox="0 0 24 24">
+        <path d="M4 6h16M7 12h10M10 18h4" />
+      </symbol>
+      <symbol id="i-minus" viewBox="0 0 24 24"><path d="M5 12h14" /></symbol>
+      <symbol id="i-plus" viewBox="0 0 24 24">
+        <path d="M12 5v14M5 12h14" />
+      </symbol>
+      <symbol id="i-fit" viewBox="0 0 24 24">
+        <path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5" />
+      </symbol>
+      <symbol id="i-focus" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="3" />
+        <path d="M12 2v3M12 19v3M2 12h3M19 12h3" />
+      </symbol>
+      <symbol id="i-route" viewBox="0 0 24 24">
+        <circle cx="6" cy="18" r="2" />
+        <circle cx="18" cy="6" r="2" />
+        <path d="M8 18h3a3 3 0 0 0 3-3V9a3 3 0 0 1 3-3" />
+      </symbol>
+      <symbol id="i-flow" viewBox="0 0 24 24">
+        <circle cx="5" cy="12" r="2" />
+        <circle cx="19" cy="6" r="2" />
+        <circle cx="19" cy="18" r="2" />
+        <path d="M7 12h4a4 4 0 0 0 4-4V6M11 12a4 4 0 0 1 4 4v2" />
+      </symbol>
+      <symbol id="i-x" viewBox="0 0 24 24">
+        <path d="m6 6 12 12M18 6 6 18" />
+      </symbol>
+      <symbol id="i-refresh" viewBox="0 0 24 24">
+        <path d="M20 7v5h-5M4 17v-5h5" />
+        <path d="M6.1 9a7 7 0 0 1 11.5-2L20 12M4 12l2.4 5a7 7 0 0 0 11.5-2" />
+      </symbol>
+      <symbol id="i-download" viewBox="0 0 24 24">
+        <path d="M12 3v12M7 10l5 5 5-5M5 21h14" />
+      </symbol>
+      <symbol id="i-map" viewBox="0 0 24 24">
+        <path d="m3 6 5-3 8 3 5-3v15l-5 3-8-3-5 3zM8 3v15M16 6v15" />
+      </symbol>
+      <symbol id="i-legend" viewBox="0 0 24 24">
+        <circle cx="6" cy="6" r="2" />
+        <path d="M11 6h9" />
+        <rect x="4" y="11" width="4" height="4" rx="1" />
+        <path d="M11 13h9M4 20h4l-2-4zM11 19h9" />
+      </symbol>
+      <symbol id="i-tag" viewBox="0 0 24 24">
+        <path d="M20 13 11 4H4v7l9 9z" />
+        <circle cx="8" cy="8" r="1" />
+      </symbol>
+      <symbol id="i-chevron-left" viewBox="0 0 24 24">
+        <path d="m15 18-6-6 6-6" />
+      </symbol>
+      <symbol id="i-chevron-right" viewBox="0 0 24 24">
+        <path d="m9 18 6-6-6-6" />
+      </symbol>
+      <symbol id="i-code" viewBox="0 0 24 24">
+        <path d="m8 9-3 3 3 3M16 9l3 3-3 3M14 5l-4 14" />
+      </symbol>
+      <symbol id="i-info" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="9" />
+        <path d="M12 11v6M12 7h.01" />
+      </symbol>
+      <symbol id="i-call" viewBox="0 0 24 24">
+        <path
+          d="M5 4h4l2 5-3 2a14 14 0 0 0 5 5l2-3 5 2v4c0 1-1 2-2 2A15 15 0 0 1 3 6c0-1 1-2 2-2z"
+        />
+      </symbol>
+    </svg>
+
+    <div id="app" class="right-closed">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark">V</span><span>Vedh</span
+          ><span class="brand-page">Graph</span>
+        </div>
+        <div class="top-actions">
+          <button
+            class="icon-button active"
+            id="leftToggle"
+            title="Toggle explorer"
+            aria-label="Toggle explorer"
+          >
+            <svg><use href="#i-panel-left" /></svg>
+          </button>
+          <button
+            class="icon-button"
+            id="rightToggle"
+            title="Toggle details"
+            aria-label="Toggle details"
+          >
+            <svg><use href="#i-panel-right" /></svg>
+          </button>
+          <span class="top-divider"></span>
+          <button
+            class="icon-button"
+            id="reload"
+            title="Reload graph"
+            aria-label="Reload graph"
+          >
+            <svg><use href="#i-refresh" /></svg>
+          </button>
+          <button class="button export-button" id="exportPng">
+            <svg><use href="#i-download" /></svg><span>Export</span>
+          </button>
+        </div>
+      </header>
+
+      <div class="workspace" id="workspace">
+        <aside class="panel left-panel" id="leftPanel">
+          <div class="panel-heading">
+            <div>
+              <span class="eyebrow">Browse</span>
+              <h1>Symbols</h1>
+            </div>
+            <button
+              class="icon-button panel-close"
+              id="closeLeft"
+              aria-label="Close explorer"
+            >
+              <svg><use href="#i-chevron-left" /></svg>
+            </button>
+          </div>
+          <div class="search-wrap">
+            <svg><use href="#i-search" /></svg
+            ><input
+              id="search"
+              type="search"
+              autocomplete="off"
+              placeholder="Find a symbol or file"
+            /><kbd>/</kbd>
+          </div>
+          <details class="filters" id="filters">
+            <summary>
+              <span
+                ><svg><use href="#i-filter" /></svg>Filters</span
+              ><span id="filterCount">All</span>
+            </summary>
+            <div class="filter-grid">
+              <label
+                >Kind<select id="kind">
+                  <option value="">Any kind</option>
+                </select></label
+              >
+              <label
+                >Group<select id="group">
+                  <option value="">Any group</option>
+                </select></label
+              >
+              <label class="wide"
+                >Relationship<select id="edge">
+                  <option value="">Any relationship</option>
+                </select></label
+              >
+            </div>
+          </details>
+          <details class="filters package-starts" id="packageStarts">
+            <summary>
+              <span
+                ><svg><use href="#i-route" /></svg>Package starts</span
+              ><span id="packageStartCount">0</span>
+            </summary>
+            <div class="entry-paths" id="entryPaths"></div>
+          </details>
+          <div class="list-heading">
+            <span id="resultCount">0 symbols</span
+            ><button class="text-button" id="clearSearch">Clear</button>
+          </div>
+          <div class="results" id="results" role="listbox"></div>
+          <div class="panel-empty" id="resultEmpty" hidden>
+            No symbols found.
+          </div>
+        </aside>
+
+        <div
+          class="resize-handle resize-left"
+          id="resizeLeft"
+          title="Drag to resize"
+        ></div>
+
+        <main class="stage" id="stage">
+          <canvas id="graph" aria-label="Code relationship graph"></canvas>
+          <div class="loading-state" id="loadingState">
+            <span class="spinner"></span><strong>Loading graph</strong
+            ><small>Reading indexed symbols…</small>
+          </div>
+          <div class="canvas-toolbar" aria-label="Graph controls">
+            <div class="tool-group">
+              <button class="icon-button" id="zoomOut" title="Zoom out">
+                <svg><use href="#i-minus" /></svg>
+              </button>
+              <button class="icon-button" id="zoomIn" title="Zoom in">
+                <svg><use href="#i-plus" /></svg>
+              </button>
+              <button class="icon-button" id="fit" title="Fit graph">
+                <svg><use href="#i-fit" /></svg>
+              </button>
+            </div>
+            <div class="tool-group">
+              <button
+                class="toolbar-button"
+                id="repoCalls"
+                title="Call flow from every detected workspace entry"
+              >
+                <svg><use href="#i-flow" /></svg><span>Monorepo flow</span>
+              </button>
+            </div>
+            <div class="tool-group selection-tools">
+              <button class="toolbar-button" id="focus" disabled>
+                <svg><use href="#i-focus" /></svg><span>Nearby</span>
+              </button>
+              <button class="toolbar-button" id="path" disabled>
+                <svg><use href="#i-route" /></svg><span>Path</span>
+              </button>
+              <button class="toolbar-button" id="calls" disabled>
+                <svg><use href="#i-flow" /></svg><span>Call flow</span>
+              </button>
+              <button
+                class="icon-button"
+                id="clear"
+                disabled
+                title="Clear focus"
+              >
+                <svg><use href="#i-x" /></svg>
+              </button>
+            </div>
+          </div>
+          <div class="view-title" id="viewTitle" hidden>
+            <span id="viewTitleText"></span
+            ><button id="exitView">Back to graph</button>
+          </div>
+          <div class="canvas-options">
+            <button
+              class="icon-button active"
+              id="edgeLabels"
+              title="Relationship labels"
+            >
+              <svg><use href="#i-tag" /></svg>
+            </button>
+            <button class="icon-button active" id="legendToggle" title="Legend">
+              <svg><use href="#i-legend" /></svg>
+            </button>
+            <button
+              class="icon-button active"
+              id="minimapToggle"
+              title="Minimap"
+            >
+              <svg><use href="#i-map" /></svg>
+            </button>
+          </div>
+          <aside class="legend" id="legend" aria-label="Graph legend">
+            <div id="legendContent"></div>
+          </aside>
+          <div class="tooltip" id="tooltip" hidden></div>
+          <div class="minimap-wrap" id="minimapWrap">
+            <canvas id="minimap"></canvas>
+          </div>
+        </main>
+
+        <div
+          class="resize-handle resize-right"
+          id="resizeRight"
+          title="Drag to resize"
+        ></div>
+
+        <aside class="panel right-panel" id="rightPanel">
+          <div class="detail-head">
+            <div class="detail-title">
+              <span class="kind-dot" id="detailDot"></span>
+              <div>
+                <span class="eyebrow" id="detailKind">Symbol</span>
+                <h2 id="detailName">Details</h2>
+              </div>
+            </div>
+            <button
+              class="icon-button panel-close"
+              id="closeRight"
+              aria-label="Close details"
+            >
+              <svg><use href="#i-chevron-right" /></svg>
+            </button>
+          </div>
+          <nav class="tabs" aria-label="Symbol details">
+            <button class="tab active" data-tab="info">
+              <svg><use href="#i-info" /></svg>Info
+            </button>
+            <button class="tab" data-tab="code">
+              <svg><use href="#i-code" /></svg>Code
+            </button>
+            <button class="tab" data-tab="calls">
+              <svg><use href="#i-call" /></svg>Calls
+            </button>
+          </nav>
+          <div class="detail-content" id="detail">
+            <div class="detail-placeholder">
+              <svg><use href="#i-focus" /></svg>
+              <p>Select a symbol to see the essentials.</p>
+            </div>
+          </div>
+        </aside>
+      </div>
+
+      <footer class="statusbar">
+        <div>
+          <span class="status-dot" id="statusDot"></span
+          ><span id="message">Ready</span>
+        </div>
+        <div class="status-metrics">
+          <span id="nodeStat">0 symbols</span
+          ><span id="edgeStat">0 relationships</span
+          ><span id="zoomStat">100%</span>
+        </div>
+      </footer>
+    </div>
+    <script type="module" src="/assets/main.js"></script>
+  </body>
+</html>

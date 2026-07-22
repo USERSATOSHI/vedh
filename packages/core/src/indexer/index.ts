@@ -11,6 +11,7 @@ import {
   type Relation,
 } from '@vedh/parser';
 import type { EdgeInfo, NodeInfo } from '@vedh/types';
+import type { CoreDatabaseError } from '../db/error.js';
 import { GraphRepository } from '../repository/index.js';
 import {
   IndexerErrorKind,
@@ -85,10 +86,29 @@ export class ProjectIndexer implements ProjectIndexerContract {
       );
     const schemaVersion = options.schemaVersion ?? INDEX_SCHEMA_VERSION;
     const hashes = new Map<string, { hash: string; mtime: number }>();
-    for (const filePath of options.files) {
-      const hashed = await this.#hashFile(filePath);
-      if (hashed.isErr()) return hashed;
-      hashes.set(filePath, hashed.value);
+    options.onProgress?.({
+      stage: 'hashing',
+      message: `Hashing ${options.files.length} source files...`,
+      completed: 0,
+      total: options.files.length,
+    });
+    const hashBatchSize = 64;
+    for (
+      let offset = 0;
+      offset < options.files.length;
+      offset += hashBatchSize
+    ) {
+      const files = options.files.slice(offset, offset + hashBatchSize);
+      const batch = await Promise.all(
+        files.map(async (filePath) => ({
+          filePath,
+          result: await this.#hashFile(filePath),
+        })),
+      );
+      for (const hashed of batch) {
+        if (hashed.result.isErr()) return hashed.result;
+        hashes.set(hashed.filePath, hashed.result.value);
+      }
     }
     const deleted = [...prior.keys()].filter((file) => !hashes.has(file));
     const changed = options.files.filter(
@@ -133,6 +153,12 @@ export class ProjectIndexer implements ProjectIndexerContract {
     }
     if (options.signal?.aborted)
       return err(toIndexerError(IndexerErrorKind.Aborted, {}));
+    options.onProgress?.({
+      stage: 'parsing',
+      message: `Parsing ${filesToParse.length} file(s); reusing ${cached.size} cached result(s)...`,
+      completed: 0,
+      total: filesToParse.length,
+    });
     const batch = await parser.value.parseFiles(filesToParse, {
       projectRoot: options.projectDir,
       signal: options.signal,
@@ -149,12 +175,35 @@ export class ProjectIndexer implements ProjectIndexerContract {
     for (const [file, result] of batch.value.results) parsed.set(file, result);
     for (const file of deleted) parsed.delete(file);
 
+    options.onProgress?.({
+      stage: 'writing',
+      message: 'Writing declarations and graph state...',
+    });
+    const began = db.run('BEGIN IMMEDIATE');
+    if (began.isErr())
+      return err(
+        toIndexerError(IndexerErrorKind.DatabaseFailed, {
+          cause: began.error,
+        }),
+      );
+    const rollback = <T>(result: T): T => {
+      void db.run('ROLLBACK');
+      return result;
+    };
+    const databaseFailure = (cause: CoreDatabaseError) =>
+      rollback(
+        err(
+          toIndexerError(IndexerErrorKind.DatabaseFailed, {
+            cause,
+          }),
+        ),
+      );
     const clear = this.#clearChanged(
       options.repoHash,
       fullRebuild ? options.files.concat(deleted) : changed.concat(deleted),
       fullRebuild,
     );
-    if (clear.isErr()) return clear;
+    if (clear.isErr()) return rollback(clear);
     let indexedNodes = 0;
     for (const file of filesToParse) {
       const result = parsed.get(file);
@@ -166,12 +215,7 @@ export class ProjectIndexer implements ProjectIndexerContract {
           options.sourceInlineMaxLines ?? 40,
         );
         const saved = this.#repository.createNode(node);
-        if (saved.isErr())
-          return err(
-            toIndexerError(IndexerErrorKind.DatabaseFailed, {
-              cause: saved.error,
-            }),
-          );
+        if (saved.isErr()) return databaseFailure(saved.error);
         indexedNodes++;
       }
     }
@@ -179,82 +223,46 @@ export class ProjectIndexer implements ProjectIndexerContract {
       "DELETE FROM wiki_pages WHERE path IN (SELECT id FROM nodes WHERE repo_hash = ? AND kind = 'event')",
       [options.repoHash],
     );
-    if (eventWiki.isErr())
-      return err(
-        toIndexerError(IndexerErrorKind.DatabaseFailed, {
-          cause: eventWiki.error,
-        }),
-      );
+    if (eventWiki.isErr()) return databaseFailure(eventWiki.error);
     const eventEdges = db.run(
       "DELETE FROM edges WHERE source IN (SELECT id FROM nodes WHERE repo_hash = ? AND kind = 'event') OR target IN (SELECT id FROM nodes WHERE repo_hash = ? AND kind = 'event')",
       [options.repoHash, options.repoHash],
     );
-    if (eventEdges.isErr())
-      return err(
-        toIndexerError(IndexerErrorKind.DatabaseFailed, {
-          cause: eventEdges.error,
-        }),
-      );
+    if (eventEdges.isErr()) return databaseFailure(eventEdges.error);
     const oldEvents = db.run(
       "DELETE FROM nodes WHERE repo_hash = ? AND kind = 'event'",
       [options.repoHash],
     );
-    if (oldEvents.isErr())
-      return err(
-        toIndexerError(IndexerErrorKind.DatabaseFailed, {
-          cause: oldEvents.error,
-        }),
-      );
+    if (oldEvents.isErr()) return databaseFailure(oldEvents.error);
     const nodesResult = this.#repository.getNodes(options.repoHash);
-    if (nodesResult.isErr())
-      return err(
-        toIndexerError(IndexerErrorKind.DatabaseFailed, {
-          cause: nodesResult.error,
-        }),
-      );
+    if (nodesResult.isErr()) return databaseFailure(nodesResult.error);
     const relationClear = db.run(
       "DELETE FROM edges WHERE type != 'contains' AND source IN (SELECT id FROM nodes WHERE repo_hash = ?)",
       [options.repoHash],
     );
-    if (relationClear.isErr())
-      return err(
-        toIndexerError(IndexerErrorKind.DatabaseFailed, {
-          cause: relationClear.error,
-        }),
-      );
+    if (relationClear.isErr()) return databaseFailure(relationClear.error);
+    options.onProgress?.({
+      stage: 'linking',
+      message: 'Resolving calls, imports, events, and dependencies...',
+    });
     const linked = this.#link(options, parsed, nodesResult.value);
-    if (linked.isErr()) return linked;
+    if (linked.isErr()) return rollback(linked);
     for (const node of linked.value.nodes) {
       const saved = this.#repository.createNode(node);
-      if (saved.isErr())
-        return err(
-          toIndexerError(IndexerErrorKind.DatabaseFailed, {
-            cause: saved.error,
-          }),
-        );
+      if (saved.isErr()) return databaseFailure(saved.error);
       indexedNodes++;
     }
     for (const edge of linked.value.edges) {
       const saved = this.#repository.createEdge(edge);
-      if (saved.isErr())
-        return err(
-          toIndexerError(IndexerErrorKind.DatabaseFailed, {
-            cause: saved.error,
-          }),
-        );
+      if (saved.isErr()) return databaseFailure(saved.error);
     }
     const persisted = this.#persistState(options, parsed, hashes, deleted);
-    if (persisted.isErr()) return persisted;
+    if (persisted.isErr()) return rollback(persisted);
     const counts = db.get<{ nodes: number; files: number }>(
       'SELECT (SELECT COUNT(*) FROM nodes WHERE repo_hash = ?) AS nodes, (SELECT COUNT(*) FROM file_manifest WHERE repo_hash = ?) AS files',
       [options.repoHash, options.repoHash],
     );
-    if (counts.isErr())
-      return err(
-        toIndexerError(IndexerErrorKind.DatabaseFailed, {
-          cause: counts.error,
-        }),
-      );
+    if (counts.isErr()) return databaseFailure(counts.error);
     const commitHash =
       options.commitHash ?? this.#gitCommit(options.projectDir);
     const snapshot = this.#repository.updateSnapshot(options.repoHash, {
@@ -263,12 +271,9 @@ export class ProjectIndexer implements ProjectIndexerContract {
       fileCount: counts.value?.files ?? options.files.length,
       schemaVersion,
     });
-    if (snapshot.isErr())
-      return err(
-        toIndexerError(IndexerErrorKind.DatabaseFailed, {
-          cause: snapshot.error,
-        }),
-      );
+    if (snapshot.isErr()) return databaseFailure(snapshot.error);
+    const committed = db.run('COMMIT');
+    if (committed.isErr()) return databaseFailure(committed.error);
     return ok({
       indexedFiles: filesToParse.length,
       indexedNodes,

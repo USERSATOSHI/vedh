@@ -1763,6 +1763,7 @@ class CoreDatabase {
     return safeCall(() => {
       this.#database.exec(`
 				PRAGMA journal_mode = WAL;
+				PRAGMA synchronous = NORMAL;
 				PRAGMA foreign_keys = ON;
 				CREATE TABLE IF NOT EXISTS repos (
 					repo_hash TEXT PRIMARY KEY, url TEXT DEFAULT '', name TEXT DEFAULT '',
@@ -2377,13 +2378,19 @@ class AnalysisService {
       return ok(undefined);
     const at = (p) => degrees[Math.max(0, Math.ceil(p / 100 * degrees.length) - 1)];
     const levels = { god: at(95), high: at(80), mid: at(50) };
+    const begun = this.#db.run("BEGIN IMMEDIATE");
+    if (begun.isErr())
+      return begun;
     for (const [id, value] of values.value) {
       const level = value.degree > levels.god ? "god" : value.degree > levels.high ? "high" : value.degree > levels.mid ? "mid" : "low";
       const result = this.#db.run("UPDATE nodes SET hierarchy_level = ? WHERE id = ?", [level, id]);
-      if (result.isErr())
+      if (result.isErr()) {
+        this.#db.run("ROLLBACK");
         return result;
+      }
     }
-    return ok(undefined);
+    const committed = this.#db.run("COMMIT");
+    return committed.isErr() ? committed : ok(undefined);
   }
   godNodes(repoHash) {
     const result = this.#db.all(repoHash ? "SELECT id FROM nodes WHERE repo_hash = ? AND hierarchy_level = 'god'" : "SELECT id FROM nodes WHERE hierarchy_level = 'god'", repoHash ? [repoHash] : []);
@@ -2398,6 +2405,9 @@ class AnalysisService {
       return repo;
     const root = repo.value?.url?.replace(/[\\/]$/, "") ?? "";
     const groups = new Map;
+    const begun = this.#db.run("BEGIN IMMEDIATE");
+    if (begun.isErr())
+      return begun;
     for (const row of rows.value) {
       const relativePath = root && row.file_path.startsWith(root) ? row.file_path.slice(root.length).replace(/^[\\/]+/, "") : row.file_path;
       const name = this.#domain(relativePath, configuredDomains);
@@ -2408,9 +2418,14 @@ class AnalysisService {
       group.nodeIds.push(row.id);
       groups.set(name, group);
       const updated = this.#db.run("UPDATE nodes SET metadata_json=json_set(COALESCE(metadata_json,'{}'),'$.domain',?) WHERE id=?", [name, row.id]);
-      if (updated.isErr())
+      if (updated.isErr()) {
+        this.#db.run("ROLLBACK");
         return updated;
+      }
     }
+    const committed = this.#db.run("COMMIT");
+    if (committed.isErr())
+      return committed;
     return ok([...groups.values()].sort((a, b) => a.name.localeCompare(b.name)));
   }
   detectCommunities(repoHash) {
@@ -2468,17 +2483,27 @@ class AnalysisService {
       ]);
     }
     const assignments = computeLouvain(filePaths, adjacency);
+    const begun = this.#db.run("BEGIN IMMEDIATE");
+    if (begun.isErr())
+      return begun;
     const cleared = this.#db.run("UPDATE nodes SET metadata_json=json_remove(COALESCE(metadata_json,'{}'),'$.community_id','$.community_area') WHERE repo_hash=?", [repoHash]);
-    if (cleared.isErr())
+    if (cleared.isErr()) {
+      this.#db.run("ROLLBACK");
       return cleared;
+    }
     for (const node of nodes.value) {
       const communityId = assignments.get(node.file_path);
       if (communityId === undefined)
         continue;
       const updated = this.#db.run("UPDATE nodes SET metadata_json=json_set(COALESCE(metadata_json,'{}'),'$.community_id',?,'$.community_area',?) WHERE id=?", [communityId, this.#architectureArea(node.file_path, root), node.id]);
-      if (updated.isErr())
+      if (updated.isErr()) {
+        this.#db.run("ROLLBACK");
         return updated;
+      }
     }
+    const committed = this.#db.run("COMMIT");
+    if (committed.isErr())
+      return committed;
     return this.communities(repoHash);
   }
   communities(repoHash, limit = 20) {
@@ -2654,11 +2679,24 @@ class ProjectIndexer {
       }));
     const schemaVersion = options.schemaVersion ?? INDEX_SCHEMA_VERSION;
     const hashes = new Map;
-    for (const filePath of options.files) {
-      const hashed = await this.#hashFile(filePath);
-      if (hashed.isErr())
-        return hashed;
-      hashes.set(filePath, hashed.value);
+    options.onProgress?.({
+      stage: "hashing",
+      message: `Hashing ${options.files.length} source files...`,
+      completed: 0,
+      total: options.files.length
+    });
+    const hashBatchSize = 64;
+    for (let offset = 0;offset < options.files.length; offset += hashBatchSize) {
+      const files = options.files.slice(offset, offset + hashBatchSize);
+      const batch2 = await Promise.all(files.map(async (filePath) => ({
+        filePath,
+        result: await this.#hashFile(filePath)
+      })));
+      for (const hashed of batch2) {
+        if (hashed.result.isErr())
+          return hashed.result;
+        hashes.set(hashed.filePath, hashed.result.value);
+      }
     }
     const deleted = [...prior.keys()].filter((file) => !hashes.has(file));
     const changed = options.files.filter((file) => prior.get(file)?.content_hash !== hashes.get(file)?.hash);
@@ -2688,6 +2726,12 @@ class ProjectIndexer {
     }
     if (options.signal?.aborted)
       return err(toIndexerError(IndexerErrorKind.Aborted, {}));
+    options.onProgress?.({
+      stage: "parsing",
+      message: `Parsing ${filesToParse.length} file(s); reusing ${cached.size} cached result(s)...`,
+      completed: 0,
+      total: filesToParse.length
+    });
     const batch = await parser.value.parseFiles(filesToParse, {
       projectRoot: options.projectDir,
       signal: options.signal,
@@ -2703,9 +2747,25 @@ class ProjectIndexer {
       parsed.set(file, result);
     for (const file of deleted)
       parsed.delete(file);
+    options.onProgress?.({
+      stage: "writing",
+      message: "Writing declarations and graph state..."
+    });
+    const began = db.run("BEGIN IMMEDIATE");
+    if (began.isErr())
+      return err(toIndexerError(IndexerErrorKind.DatabaseFailed, {
+        cause: began.error
+      }));
+    const rollback = (result) => {
+      db.run("ROLLBACK");
+      return result;
+    };
+    const databaseFailure = (cause) => rollback(err(toIndexerError(IndexerErrorKind.DatabaseFailed, {
+      cause
+    })));
     const clear = this.#clearChanged(options.repoHash, fullRebuild ? options.files.concat(deleted) : changed.concat(deleted), fullRebuild);
     if (clear.isErr())
-      return clear;
+      return rollback(clear);
     let indexedNodes = 0;
     for (const file of filesToParse) {
       const result = parsed.get(file);
@@ -2715,63 +2775,49 @@ class ProjectIndexer {
         const node = await this.#node(options.repoHash, declaration, options.sourceInlineMaxLines ?? 40);
         const saved = this.#repository.createNode(node);
         if (saved.isErr())
-          return err(toIndexerError(IndexerErrorKind.DatabaseFailed, {
-            cause: saved.error
-          }));
+          return databaseFailure(saved.error);
         indexedNodes++;
       }
     }
     const eventWiki = db.run("DELETE FROM wiki_pages WHERE path IN (SELECT id FROM nodes WHERE repo_hash = ? AND kind = 'event')", [options.repoHash]);
     if (eventWiki.isErr())
-      return err(toIndexerError(IndexerErrorKind.DatabaseFailed, {
-        cause: eventWiki.error
-      }));
+      return databaseFailure(eventWiki.error);
     const eventEdges = db.run("DELETE FROM edges WHERE source IN (SELECT id FROM nodes WHERE repo_hash = ? AND kind = 'event') OR target IN (SELECT id FROM nodes WHERE repo_hash = ? AND kind = 'event')", [options.repoHash, options.repoHash]);
     if (eventEdges.isErr())
-      return err(toIndexerError(IndexerErrorKind.DatabaseFailed, {
-        cause: eventEdges.error
-      }));
+      return databaseFailure(eventEdges.error);
     const oldEvents = db.run("DELETE FROM nodes WHERE repo_hash = ? AND kind = 'event'", [options.repoHash]);
     if (oldEvents.isErr())
-      return err(toIndexerError(IndexerErrorKind.DatabaseFailed, {
-        cause: oldEvents.error
-      }));
+      return databaseFailure(oldEvents.error);
     const nodesResult = this.#repository.getNodes(options.repoHash);
     if (nodesResult.isErr())
-      return err(toIndexerError(IndexerErrorKind.DatabaseFailed, {
-        cause: nodesResult.error
-      }));
+      return databaseFailure(nodesResult.error);
     const relationClear = db.run("DELETE FROM edges WHERE type != 'contains' AND source IN (SELECT id FROM nodes WHERE repo_hash = ?)", [options.repoHash]);
     if (relationClear.isErr())
-      return err(toIndexerError(IndexerErrorKind.DatabaseFailed, {
-        cause: relationClear.error
-      }));
+      return databaseFailure(relationClear.error);
+    options.onProgress?.({
+      stage: "linking",
+      message: "Resolving calls, imports, events, and dependencies..."
+    });
     const linked = this.#link(options, parsed, nodesResult.value);
     if (linked.isErr())
-      return linked;
+      return rollback(linked);
     for (const node of linked.value.nodes) {
       const saved = this.#repository.createNode(node);
       if (saved.isErr())
-        return err(toIndexerError(IndexerErrorKind.DatabaseFailed, {
-          cause: saved.error
-        }));
+        return databaseFailure(saved.error);
       indexedNodes++;
     }
     for (const edge of linked.value.edges) {
       const saved = this.#repository.createEdge(edge);
       if (saved.isErr())
-        return err(toIndexerError(IndexerErrorKind.DatabaseFailed, {
-          cause: saved.error
-        }));
+        return databaseFailure(saved.error);
     }
     const persisted = this.#persistState(options, parsed, hashes, deleted);
     if (persisted.isErr())
-      return persisted;
+      return rollback(persisted);
     const counts = db.get("SELECT (SELECT COUNT(*) FROM nodes WHERE repo_hash = ?) AS nodes, (SELECT COUNT(*) FROM file_manifest WHERE repo_hash = ?) AS files", [options.repoHash, options.repoHash]);
     if (counts.isErr())
-      return err(toIndexerError(IndexerErrorKind.DatabaseFailed, {
-        cause: counts.error
-      }));
+      return databaseFailure(counts.error);
     const commitHash = options.commitHash ?? this.#gitCommit(options.projectDir);
     const snapshot = this.#repository.updateSnapshot(options.repoHash, {
       commitHash: commitHash ?? undefined,
@@ -2780,9 +2826,10 @@ class ProjectIndexer {
       schemaVersion
     });
     if (snapshot.isErr())
-      return err(toIndexerError(IndexerErrorKind.DatabaseFailed, {
-        cause: snapshot.error
-      }));
+      return databaseFailure(snapshot.error);
+    const committed = db.run("COMMIT");
+    if (committed.isErr())
+      return databaseFailure(committed.error);
     return ok({
       indexedFiles: filesToParse.length,
       indexedNodes,
@@ -8394,7 +8441,8 @@ Operations:
       name: basename4(projectDir),
       fullRebuild: flags.full,
       sourceInlineMaxLines: this.#sourceInlineMaxLines(config),
-      workspacePackages: discovered.workspacePackages
+      workspacePackages: discovered.workspacePackages,
+      onProgress: ({ message }) => this.#stdout(`◇  ${message}`)
     });
     if (result.isErr())
       return err(toCliError(2 /* CoreFailed */, { cause: result.error }));
@@ -8412,11 +8460,13 @@ Operations:
       database.value.close();
       return err(toCliError(2 /* CoreFailed */, { cause: godNodes.error }));
     }
+    this.#stdout("◇  Detecting file communities...");
     const communities = analysis.detectCommunities(repoHash);
     if (communities.isErr()) {
       database.value.close();
       return err(toCliError(2 /* CoreFailed */, { cause: communities.error }));
     }
+    this.#stdout("◇  Assigning architectural domains...");
     const domains = analysis.detectDomains(repoHash, config.domains);
     if (domains.isErr()) {
       database.value.close();
@@ -8428,6 +8478,7 @@ Operations:
         generateMissingDocs: flags.generateMissingDocs,
         importsExportsOnly: flags.importsExportsOnly
       });
+    this.#stdout("◇  Rebuilding wiki pages and search index...");
     const wiki = new WikiService(database.value).generate(repoHash);
     if (wiki.isErr()) {
       database.value.close();
@@ -8644,4 +8695,4 @@ ${this.#describeCause(cause.cause)}` : "";
 // packages/cli/src/bin.ts
 await new VedhCli().run(process.argv.slice(2));
 
-//# debugId=4E8CD91676285C4C64756E2164756E21
+//# debugId=6B01B84F87A162A764756E2164756E21

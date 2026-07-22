@@ -57,6 +57,8 @@ export class AnalysisService implements AnalysisServiceContract {
     const at = (p: number) =>
       degrees[Math.max(0, Math.ceil((p / 100) * degrees.length) - 1)]!;
     const levels = { god: at(95), high: at(80), mid: at(50) };
+    const begun = this.#db.run('BEGIN IMMEDIATE');
+    if (begun.isErr()) return begun;
     for (const [id, value] of values.value) {
       const level =
         value.degree > levels.god
@@ -70,9 +72,13 @@ export class AnalysisService implements AnalysisServiceContract {
         'UPDATE nodes SET hierarchy_level = ? WHERE id = ?',
         [level, id],
       );
-      if (result.isErr()) return result;
+      if (result.isErr()) {
+        void this.#db.run('ROLLBACK');
+        return result;
+      }
     }
-    return ok(undefined);
+    const committed = this.#db.run('COMMIT');
+    return committed.isErr() ? committed : ok(undefined);
   }
   godNodes(repoHash?: string) {
     const result = this.#db.all<IdRow>(
@@ -99,6 +105,8 @@ export class AnalysisService implements AnalysisServiceContract {
     if (repo.isErr()) return repo;
     const root = repo.value?.url?.replace(/[\\/]$/, '') ?? '';
     const groups = new Map<string, DomainGroup>();
+    const begun = this.#db.run('BEGIN IMMEDIATE');
+    if (begun.isErr()) return begun;
     for (const row of rows.value) {
       const relativePath =
         root && row.file_path.startsWith(root)
@@ -115,8 +123,13 @@ export class AnalysisService implements AnalysisServiceContract {
         "UPDATE nodes SET metadata_json=json_set(COALESCE(metadata_json,'{}'),'$.domain',?) WHERE id=?",
         [name, row.id],
       );
-      if (updated.isErr()) return updated;
+      if (updated.isErr()) {
+        void this.#db.run('ROLLBACK');
+        return updated;
+      }
     }
+    const committed = this.#db.run('COMMIT');
+    if (committed.isErr()) return committed;
     return ok(
       [...groups.values()].sort((a, b) => a.name.localeCompare(b.name)),
     );
@@ -192,11 +205,16 @@ export class AnalysisService implements AnalysisServiceContract {
       ]);
     }
     const assignments = computeLouvain(filePaths, adjacency);
+    const begun = this.#db.run('BEGIN IMMEDIATE');
+    if (begun.isErr()) return begun;
     const cleared = this.#db.run(
       "UPDATE nodes SET metadata_json=json_remove(COALESCE(metadata_json,'{}'),'$.community_id','$.community_area') WHERE repo_hash=?",
       [repoHash],
     );
-    if (cleared.isErr()) return cleared;
+    if (cleared.isErr()) {
+      void this.#db.run('ROLLBACK');
+      return cleared;
+    }
     for (const node of nodes.value) {
       const communityId = assignments.get(node.file_path);
       if (communityId === undefined) continue;
@@ -204,8 +222,13 @@ export class AnalysisService implements AnalysisServiceContract {
         "UPDATE nodes SET metadata_json=json_set(COALESCE(metadata_json,'{}'),'$.community_id',?,'$.community_area',?) WHERE id=?",
         [communityId, this.#architectureArea(node.file_path, root), node.id],
       );
-      if (updated.isErr()) return updated;
+      if (updated.isErr()) {
+        void this.#db.run('ROLLBACK');
+        return updated;
+      }
     }
+    const committed = this.#db.run('COMMIT');
+    if (committed.isErr()) return committed;
     return this.communities(repoHash);
   }
   communities(repoHash: string, limit = 20) {

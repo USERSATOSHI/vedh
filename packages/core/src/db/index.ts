@@ -158,6 +158,7 @@ export class CoreDatabase implements CoreDatabaseContract {
       () => {
         this.#database.exec(`
 				PRAGMA journal_mode = WAL;
+				PRAGMA synchronous = NORMAL;
 				PRAGMA foreign_keys = ON;
 				CREATE TABLE IF NOT EXISTS repos (
 					repo_hash TEXT PRIMARY KEY, url TEXT DEFAULT '', name TEXT DEFAULT '',

@@ -28,20 +28,21 @@ can be shipped separately without framework knowledge in core.
 ## Installation
 
 Vedh requires Node.js 24 and can be installed directly from the public Git
-repository. A version tag is recommended so the installed CLI is reproducible.
+release artifacts without publishing the monorepo to npm. Releases are immutable
+and avoid npm rebuilding the workspace monorepo during installation.
 
 ```bash
 # npm
 CXXFLAGS='-std=gnu++20' npm install --global \
   --allow-scripts=better-sqlite3,tree-sitter,tree-sitter-javascript,tree-sitter-php,tree-sitter-python,tree-sitter-typescript \
-  'git+https://github.com/usersatoshi/vedh.git#v0.1.0'
+  'https://github.com/usersatoshi/vedh/releases/download/v0.1.0/vedh-0.1.0.tgz'
 
 # Bun
 CXXFLAGS='-std=gnu++20' bun add --global \
-  'git+https://github.com/usersatoshi/vedh.git#v0.1.0'
+  'https://github.com/usersatoshi/vedh/releases/download/v0.1.0/vedh-0.1.0.tgz'
 ```
 
-The tagged repository includes the prebuilt CLI, parser worker, agent skill, and
+The release package includes the prebuilt CLI, parser worker, agent skill, and
 visualizer assets. Users do not need to clone the repository or install the
 monorepo workspaces. The C++20 flag is required when Tree-sitter compiles
 against Node.js 24; current npm versions also require explicit approval before

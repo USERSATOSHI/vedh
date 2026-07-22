@@ -499,6 +499,7 @@ export class VedhCli implements VedhCliContract {
       fullRebuild: flags.full,
       sourceInlineMaxLines: this.#sourceInlineMaxLines(config),
       workspacePackages: discovered.workspacePackages,
+      onProgress: ({ message }) => this.#stdout(`◇  ${message}`),
     });
     if (result.isErr())
       return err(toCliError(CliErrorKind.CoreFailed, { cause: result.error }));
@@ -524,6 +525,7 @@ export class VedhCli implements VedhCliContract {
         toCliError(CliErrorKind.CoreFailed, { cause: godNodes.error }),
       );
     }
+    this.#stdout('◇  Detecting file communities...');
     const communities = analysis.detectCommunities(repoHash);
     if (communities.isErr()) {
       database.value.close();
@@ -531,6 +533,7 @@ export class VedhCli implements VedhCliContract {
         toCliError(CliErrorKind.CoreFailed, { cause: communities.error }),
       );
     }
+    this.#stdout('◇  Assigning architectural domains...');
     const domains = analysis.detectDomains(repoHash, config.domains);
     if (domains.isErr()) {
       database.value.close();
@@ -542,6 +545,7 @@ export class VedhCli implements VedhCliContract {
         generateMissingDocs: flags.generateMissingDocs,
         importsExportsOnly: flags.importsExportsOnly,
       });
+    this.#stdout('◇  Rebuilding wiki pages and search index...');
     const wiki = new WikiService(database.value).generate(repoHash);
     if (wiki.isErr()) {
       database.value.close();

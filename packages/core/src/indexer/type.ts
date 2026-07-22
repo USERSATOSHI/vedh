@@ -13,6 +13,13 @@ export interface IndexProjectOptions {
   commitHash?: string;
   workspacePackages?: Readonly<Record<string, string>>;
   sourceInlineMaxLines?: number;
+  onProgress?: (progress: IndexProgress) => void;
+}
+export interface IndexProgress {
+  stage: 'hashing' | 'parsing' | 'writing' | 'linking';
+  message: string;
+  completed?: number;
+  total?: number;
 }
 export interface IndexProjectResult {
   indexedFiles: number;

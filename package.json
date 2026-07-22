@@ -46,9 +46,6 @@
     "packages/*",
     "packages/extensions/*"
   ],
-  "peerDependencies": {
-    "typescript": "^6"
-  },
   "dependencies": {
     "better-sqlite3": "^12.5.0",
     "tree-sitter": "^0.25.0",

@@ -2788,8 +2788,9 @@ class ProjectIndexer {
       parsed.delete(file);
     options.onProgress?.({
       stage: "writing",
-      message: "Writing declarations and graph state..."
+      message: "Preparing graph storage..."
     });
+    let writingStepStarted = Date.now();
     const began = db.run("BEGIN IMMEDIATE");
     if (began.isErr())
       return err(toIndexerError(IndexerErrorKind.DatabaseFailed, {
@@ -2802,9 +2803,22 @@ class ProjectIndexer {
     const databaseFailure = (cause) => rollback(err(toIndexerError(IndexerErrorKind.DatabaseFailed, {
       cause
     })));
+    options.onProgress?.({
+      stage: "writing",
+      message: `Prepared graph storage in ${this.#secondsSince(writingStepStarted)}; removing stale graph data...`
+    });
+    writingStepStarted = Date.now();
     const clear = this.#clearChanged(options.repoHash, fullRebuild ? options.files.concat(deleted) : changed.concat(deleted), fullRebuild);
     if (clear.isErr())
       return rollback(clear);
+    const declarationCount = filesToParse.reduce((count, file) => count + (parsed.get(file)?.declarations.length ?? 0), 0);
+    options.onProgress?.({
+      stage: "writing",
+      message: `Removed stale graph data in ${this.#secondsSince(writingStepStarted)}; processing ${declarationCount} declarations...`,
+      completed: 0,
+      total: declarationCount
+    });
+    writingStepStarted = Date.now();
     const declarationNodes = [];
     for (const file of filesToParse) {
       const result = parsed.get(file);
@@ -2813,29 +2827,48 @@ class ProjectIndexer {
       for (const declaration of result.declarations)
         declarationNodes.push(this.#node(options.repoHash, declaration, options.sourceInlineMaxLines ?? 40));
     }
+    this.#sourceCache.clear();
+    options.onProgress?.({
+      stage: "writing",
+      message: `Processed ${declarationNodes.length} declarations in ${this.#secondsSince(writingStepStarted)}; saving graph...`,
+      completed: 0,
+      total: declarationNodes.length
+    });
+    writingStepStarted = Date.now();
     const declarationsSaved = this.#repository.createNodes(declarationNodes);
     if (declarationsSaved.isErr())
       return databaseFailure(declarationsSaved.error);
-    const eventWiki = db.run("DELETE FROM wiki_pages WHERE path IN (SELECT id FROM nodes WHERE repo_hash = ? AND kind = 'event')", [options.repoHash]);
-    if (eventWiki.isErr())
-      return databaseFailure(eventWiki.error);
-    const eventEdges = db.run("DELETE FROM edges WHERE source IN (SELECT id FROM nodes WHERE repo_hash = ? AND kind = 'event') OR target IN (SELECT id FROM nodes WHERE repo_hash = ? AND kind = 'event')", [options.repoHash, options.repoHash]);
-    if (eventEdges.isErr())
-      return databaseFailure(eventEdges.error);
-    const oldEvents = db.run("DELETE FROM nodes WHERE repo_hash = ? AND kind = 'event'", [options.repoHash]);
-    if (oldEvents.isErr())
-      return databaseFailure(oldEvents.error);
-    const nodesResult = this.#repository.getNodes(options.repoHash);
-    if (nodesResult.isErr())
-      return databaseFailure(nodesResult.error);
-    const relationClear = db.run("DELETE FROM edges WHERE type != 'contains' AND source IN (SELECT id FROM nodes WHERE repo_hash = ?)", [options.repoHash]);
-    if (relationClear.isErr())
-      return databaseFailure(relationClear.error);
+    for (const node of declarationNodes)
+      node.metadata = {};
+    let nodesForLinking = declarationNodes;
+    if (!fullRebuild) {
+      options.onProgress?.({
+        stage: "writing",
+        message: `Saved graph in ${this.#secondsSince(writingStepStarted)}; loading existing graph...`
+      });
+      writingStepStarted = Date.now();
+      const eventWiki = db.run("DELETE FROM wiki_pages WHERE path IN (SELECT id FROM nodes WHERE repo_hash = ? AND kind = 'event')", [options.repoHash]);
+      if (eventWiki.isErr())
+        return databaseFailure(eventWiki.error);
+      const eventEdges = db.run("DELETE FROM edges WHERE source IN (SELECT id FROM nodes WHERE repo_hash = ? AND kind = 'event') OR target IN (SELECT id FROM nodes WHERE repo_hash = ? AND kind = 'event')", [options.repoHash, options.repoHash]);
+      if (eventEdges.isErr())
+        return databaseFailure(eventEdges.error);
+      const oldEvents = db.run("DELETE FROM nodes WHERE repo_hash = ? AND kind = 'event'", [options.repoHash]);
+      if (oldEvents.isErr())
+        return databaseFailure(oldEvents.error);
+      const nodesResult = this.#repository.getNodes(options.repoHash);
+      if (nodesResult.isErr())
+        return databaseFailure(nodesResult.error);
+      nodesForLinking = nodesResult.value;
+      const relationClear = db.run("DELETE FROM edges WHERE type != 'contains' AND source IN (SELECT id FROM nodes WHERE repo_hash = ?)", [options.repoHash]);
+      if (relationClear.isErr())
+        return databaseFailure(relationClear.error);
+    }
     options.onProgress?.({
       stage: "linking",
-      message: "Resolving calls, imports, events, and dependencies..."
+      message: `Prepared graph in ${this.#secondsSince(writingStepStarted)}; connecting calls, imports, events, and dependencies...`
     });
-    const linked = this.#link(options, parsed, nodesResult.value);
+    const linked = this.#link(options, parsed, nodesForLinking);
     if (linked.isErr())
       return rollback(linked);
     const virtualNodesSaved = this.#repository.createNodes(linked.value.nodes);
@@ -3128,6 +3161,9 @@ class ProjectIndexer {
   }
   #closest(nodes, line) {
     return nodes.filter((node) => node.line_start <= line && node.line_end >= line).sort((a, b) => a.line_end - a.line_start - (b.line_end - b.line_start))[0];
+  }
+  #secondsSince(startedAt) {
+    return `${((Date.now() - startedAt) / 1000).toFixed(2)}s`;
   }
   async#hashFile(filePath) {
     return fromAsync(async () => {
@@ -8736,4 +8772,4 @@ ${this.#describeCause(cause.cause)}` : "";
 // packages/cli/src/bin.ts
 await new VedhCli().run(process.argv.slice(2));
 
-//# debugId=5B8D452BA1079B3564756E2164756E21
+//# debugId=665EC5D2552F1FFC64756E2164756E21

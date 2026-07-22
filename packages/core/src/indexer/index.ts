@@ -398,13 +398,27 @@ export class ProjectIndexer implements ProjectIndexerContract {
     const virtualNodes = new Map<string, NodeInfo>();
     const byFile = new Map<string, NodeInfo[]>();
     const byName = new Map<string, NodeInfo[]>();
+    const byId = new Map<string, NodeInfo>();
+    const byFileAndName = new Map<string, NodeInfo>();
+    const byParentAndName = new Map<string, NodeInfo>();
+    const moduleByFile = new Map<string, NodeInfo>();
     for (const node of nodes) {
+      byId.set(node.id, node);
       const file = byFile.get(node.file_path) ?? [];
       file.push(node);
       byFile.set(node.file_path, file);
       const named = byName.get(node.name) ?? [];
       named.push(node);
       byName.set(node.name, named);
+      const fileAndName = `${node.file_path}\0${node.name}`;
+      if (!byFileAndName.has(fileAndName)) byFileAndName.set(fileAndName, node);
+      if (node.parent_id) {
+        const parentAndName = `${node.parent_id}\0${node.name}`;
+        if (!byParentAndName.has(parentAndName))
+          byParentAndName.set(parentAndName, node);
+      }
+      if (node.kind === 'module' && !moduleByFile.has(node.file_path))
+        moduleByFile.set(node.file_path, node);
     }
     const resolver = new ImportResolver({
       projectRoot: options.projectDir,
@@ -443,6 +457,7 @@ export class ProjectIndexer implements ProjectIndexerContract {
     for (const result of parsed.values()) {
       const local = byFile.get(result.filePath) ?? [];
       const imports = new Map<string, NodeInfo>();
+      const importTargets = new Map<Relation, NodeInfo>();
       for (const relation of result.relations)
         if (relation.kind === 'import') {
           const resolved = resolver.resolveToSymbol({
@@ -454,18 +469,18 @@ export class ProjectIndexer implements ProjectIndexerContract {
           });
           if (resolved.isOk() && resolved.value) {
             const target =
-              (byFile.get(resolved.value.filePath) ?? []).find(
-                (node) => node.name === resolved.value!.symbolName,
-              ) ??
-              (byFile.get(resolved.value.filePath) ?? []).find(
-                (node) => node.kind === 'module',
-              );
-            if (target && relation.specifier)
-              imports.set(relation.specifier, target);
+              byFileAndName.get(
+                `${resolved.value.filePath}\0${resolved.value.symbolName}`,
+              ) ?? moduleByFile.get(resolved.value.filePath);
+            if (target) {
+              importTargets.set(relation, target);
+              if (relation.specifier) imports.set(relation.specifier, target);
+            }
           }
         }
+      const sourcesByLine = this.#sourcesByLine(local, result.relations);
       for (const relation of result.relations) {
-        const source = this.#closest(local, relation.range.start.line);
+        const source = sourcesByLine.get(relation.range.start.line);
         if (!source) continue;
         if (relation.kind === 'event') {
           const id = `event:${options.repoHash}:${relation.eventName}`;
@@ -510,26 +525,13 @@ export class ProjectIndexer implements ProjectIndexerContract {
         }
         let target: NodeInfo | undefined;
         if (relation.kind === 'import') {
-          const resolved = resolver.resolveToSymbol({
-            specifier: relation.module,
-            importedName: relation.specifier,
-            importerPath: result.filePath,
-            projectRoot: options.projectDir,
-            workspacePackages: options.workspacePackages,
-          });
-          if (resolved.isOk() && resolved.value)
-            target =
-              (byFile.get(resolved.value.filePath) ?? []).find(
-                (node) => node.name === resolved.value!.symbolName,
-              ) ??
-              (byFile.get(resolved.value.filePath) ?? []).find(
-                (node) => node.kind === 'module',
-              );
+          target = importTargets.get(relation);
         } else {
           const name =
             relation.kind === 'export' ? relation.target : relation.target;
           target =
-            local.find((node) => node.name === name) ?? imports.get(name);
+            byFileAndName.get(`${result.filePath}\0${name}`) ??
+            imports.get(name);
           if (!target && relation.kind === 'reference' && relation.receiver) {
             const receiver = relation.receiver.replace(
               /^this\.|^self\.|^\$this->|^\$/,
@@ -537,12 +539,12 @@ export class ProjectIndexer implements ProjectIndexerContract {
             );
             const owner =
               receiver === 'this' || receiver === 'self'
-                ? nodes.find((node) => node.id === source.parent_id)
+                ? source.parent_id
+                  ? byId.get(source.parent_id)
+                  : undefined
                 : (byName.get(receiver) ?? [])[0];
             target = owner
-              ? nodes.find(
-                  (node) => node.parent_id === owner.id && node.name === name,
-                )
+              ? byParentAndName.get(`${owner.id}\0${name}`)
               : undefined;
           }
           if (!target) {
@@ -691,12 +693,37 @@ export class ProjectIndexer implements ProjectIndexerContract {
     };
   }
 
-  #closest(nodes: NodeInfo[], line: number): NodeInfo | undefined {
-    return nodes
-      .filter((node) => node.line_start <= line && node.line_end >= line)
-      .sort(
-        (a, b) => a.line_end - a.line_start - (b.line_end - b.line_start),
-      )[0];
+  #sourcesByLine(
+    nodes: readonly NodeInfo[],
+    relations: readonly Relation[],
+  ): Map<number, NodeInfo> {
+    const lines = [
+      ...new Set(relations.map((relation) => relation.range.start.line)),
+    ].sort((a, b) => a - b);
+    const sources = new Map<number, NodeInfo>();
+    for (const node of nodes) {
+      const span = node.line_end - node.line_start;
+      let index = this.#lowerBound(lines, node.line_start);
+      while (index < lines.length && lines[index]! <= node.line_end) {
+        const line = lines[index]!;
+        const current = sources.get(line);
+        if (!current || span < current.line_end - current.line_start)
+          sources.set(line, node);
+        index++;
+      }
+    }
+    return sources;
+  }
+
+  #lowerBound(values: readonly number[], target: number): number {
+    let low = 0;
+    let high = values.length;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if (values[middle]! < target) low = middle + 1;
+      else high = middle;
+    }
+    return low;
   }
 
   #joinLinesWithinLimit(

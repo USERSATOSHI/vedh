@@ -2948,13 +2948,28 @@ class ProjectIndexer {
     const virtualNodes = new Map;
     const byFile = new Map;
     const byName = new Map;
+    const byId = new Map;
+    const byFileAndName = new Map;
+    const byParentAndName = new Map;
+    const moduleByFile = new Map;
     for (const node of nodes) {
+      byId.set(node.id, node);
       const file = byFile.get(node.file_path) ?? [];
       file.push(node);
       byFile.set(node.file_path, file);
       const named = byName.get(node.name) ?? [];
       named.push(node);
       byName.set(node.name, named);
+      const fileAndName = `${node.file_path}\x00${node.name}`;
+      if (!byFileAndName.has(fileAndName))
+        byFileAndName.set(fileAndName, node);
+      if (node.parent_id) {
+        const parentAndName = `${node.parent_id}\x00${node.name}`;
+        if (!byParentAndName.has(parentAndName))
+          byParentAndName.set(parentAndName, node);
+      }
+      if (node.kind === "module" && !moduleByFile.has(node.file_path))
+        moduleByFile.set(node.file_path, node);
     }
     const resolver = new ImportResolver({
       projectRoot: options.projectDir,
@@ -2984,6 +2999,7 @@ class ProjectIndexer {
     for (const result of parsed.values()) {
       const local = byFile.get(result.filePath) ?? [];
       const imports = new Map;
+      const importTargets = new Map;
       for (const relation of result.relations)
         if (relation.kind === "import") {
           const resolved = resolver.resolveToSymbol({
@@ -2994,13 +3010,17 @@ class ProjectIndexer {
             workspacePackages: options.workspacePackages
           });
           if (resolved.isOk() && resolved.value) {
-            const target = (byFile.get(resolved.value.filePath) ?? []).find((node) => node.name === resolved.value.symbolName) ?? (byFile.get(resolved.value.filePath) ?? []).find((node) => node.kind === "module");
-            if (target && relation.specifier)
-              imports.set(relation.specifier, target);
+            const target = byFileAndName.get(`${resolved.value.filePath}\x00${resolved.value.symbolName}`) ?? moduleByFile.get(resolved.value.filePath);
+            if (target) {
+              importTargets.set(relation, target);
+              if (relation.specifier)
+                imports.set(relation.specifier, target);
+            }
           }
         }
+      const sourcesByLine = this.#sourcesByLine(local, result.relations);
       for (const relation of result.relations) {
-        const source = this.#closest(local, relation.range.start.line);
+        const source = sourcesByLine.get(relation.range.start.line);
         if (!source)
           continue;
         if (relation.kind === "event") {
@@ -3042,22 +3062,14 @@ class ProjectIndexer {
         }
         let target;
         if (relation.kind === "import") {
-          const resolved = resolver.resolveToSymbol({
-            specifier: relation.module,
-            importedName: relation.specifier,
-            importerPath: result.filePath,
-            projectRoot: options.projectDir,
-            workspacePackages: options.workspacePackages
-          });
-          if (resolved.isOk() && resolved.value)
-            target = (byFile.get(resolved.value.filePath) ?? []).find((node) => node.name === resolved.value.symbolName) ?? (byFile.get(resolved.value.filePath) ?? []).find((node) => node.kind === "module");
+          target = importTargets.get(relation);
         } else {
           const name = relation.kind === "export" ? relation.target : relation.target;
-          target = local.find((node) => node.name === name) ?? imports.get(name);
+          target = byFileAndName.get(`${result.filePath}\x00${name}`) ?? imports.get(name);
           if (!target && relation.kind === "reference" && relation.receiver) {
             const receiver = relation.receiver.replace(/^this\.|^self\.|^\$this->|^\$/, "");
-            const owner = receiver === "this" || receiver === "self" ? nodes.find((node) => node.id === source.parent_id) : (byName.get(receiver) ?? [])[0];
-            target = owner ? nodes.find((node) => node.parent_id === owner.id && node.name === name) : undefined;
+            const owner = receiver === "this" || receiver === "self" ? source.parent_id ? byId.get(source.parent_id) : undefined : (byName.get(receiver) ?? [])[0];
+            target = owner ? byParentAndName.get(`${owner.id}\x00${name}`) : undefined;
           }
           if (!target) {
             const matches = byName.get(name) ?? [];
@@ -3154,8 +3166,35 @@ class ProjectIndexer {
       }
     };
   }
-  #closest(nodes, line) {
-    return nodes.filter((node) => node.line_start <= line && node.line_end >= line).sort((a, b) => a.line_end - a.line_start - (b.line_end - b.line_start))[0];
+  #sourcesByLine(nodes, relations) {
+    const lines = [
+      ...new Set(relations.map((relation) => relation.range.start.line))
+    ].sort((a, b) => a - b);
+    const sources = new Map;
+    for (const node of nodes) {
+      const span = node.line_end - node.line_start;
+      let index = this.#lowerBound(lines, node.line_start);
+      while (index < lines.length && lines[index] <= node.line_end) {
+        const line = lines[index];
+        const current = sources.get(line);
+        if (!current || span < current.line_end - current.line_start)
+          sources.set(line, node);
+        index++;
+      }
+    }
+    return sources;
+  }
+  #lowerBound(values, target) {
+    let low = 0;
+    let high = values.length;
+    while (low < high) {
+      const middle = low + high >>> 1;
+      if (values[middle] < target)
+        low = middle + 1;
+      else
+        high = middle;
+    }
+    return low;
   }
   #joinLinesWithinLimit(lines, start, end) {
     const selected = [];
@@ -8801,4 +8840,4 @@ ${this.#describeCause(cause.cause)}` : "";
 // packages/cli/src/bin.ts
 await new VedhCli().run(process.argv.slice(2));
 
-//# debugId=4AA9E197B579B51864756E2164756E21
+//# debugId=3E4E101D055F14B564756E2164756E21

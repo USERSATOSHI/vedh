@@ -130,6 +130,65 @@ describe('ProjectIndexer', () => {
     parser.dispose();
   });
 
+  test('attributes nested JS and PHP member calls to the correct methods', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'vedh-link-accuracy-'));
+    roots.push(root);
+    const javascript = join(root, 'nested.js');
+    const php = join(root, 'member.php');
+    writeFileSync(
+      javascript,
+      [
+        'export function target() { return 1 }',
+        'export class Box {',
+        '  caller() { return target() }',
+        '}',
+      ].join('\n'),
+    );
+    writeFileSync(
+      php,
+      [
+        '<?php',
+        'class Service {',
+        '  public function target() { return 1; }',
+        '  public function caller() { return $this->target(); }',
+        '}',
+      ].join('\n'),
+    );
+    const repoHash = 'link-accuracy-repo';
+    const opened = CoreDatabase.open({
+      repoHash,
+      projectDir: root,
+      dataDir: join(root, 'data'),
+    });
+    assert.equal(opened.isOk(), true);
+    const db = opened.value!;
+    const parser = new ParserEngine({ parallelism: false });
+    const indexed = await new ProjectIndexer(
+      new GraphRepository(db),
+      parser,
+    ).index({ repoHash, projectDir: root, files: [javascript, php] });
+    assert.equal(indexed.isOk(), true);
+    for (const file of [javascript, php]) {
+      const caller = db.get<{ id: string }>(
+        "SELECT id FROM nodes WHERE file_path=? AND name='caller'",
+        [file],
+      ).value!;
+      const target = db.get<{ id: string }>(
+        "SELECT id FROM nodes WHERE file_path=? AND name='target'",
+        [file],
+      ).value!;
+      assert.equal(
+        db.get<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM edges WHERE source=? AND target=? AND type='calls'",
+          [caller.id, target.id],
+        ).value!.count,
+        1,
+      );
+    }
+    db.close();
+    parser.dispose();
+  });
+
   test('increments deterministically, links calls, and removes deleted files', async () => {
     const root = mkdtempSync(join(tmpdir(), 'vedh-index-'));
     roots.push(root);

@@ -114,7 +114,7 @@ export class ProjectIndexer implements ProjectIndexerContract {
     const changed = options.files.filter(
       (file) => prior.get(file)?.content_hash !== hashes.get(file)?.hash,
     );
-    for (const file of [...changed, ...deleted]) this.#sourceCache.delete(file);
+    for (const file of deleted) this.#sourceCache.delete(file);
     const fullRebuild = Boolean(
       options.fullRebuild ||
       !prior.size ||
@@ -151,6 +151,9 @@ export class ProjectIndexer implements ProjectIndexerContract {
         if (!cached.has(file) && !filesToParse.includes(file))
           filesToParse.push(file);
     }
+    const parsedFiles = new Set(filesToParse);
+    for (const file of this.#sourceCache.keys())
+      if (!parsedFiles.has(file)) this.#sourceCache.delete(file);
     if (options.signal?.aborted)
       return err(toIndexerError(IndexerErrorKind.Aborted, {}));
     options.onProgress?.({
@@ -204,21 +207,22 @@ export class ProjectIndexer implements ProjectIndexerContract {
       fullRebuild,
     );
     if (clear.isErr()) return rollback(clear);
-    let indexedNodes = 0;
+    const declarationNodes: NodeInfo[] = [];
     for (const file of filesToParse) {
       const result = parsed.get(file);
       if (!result) continue;
-      for (const declaration of result.declarations) {
-        const node = await this.#node(
-          options.repoHash,
-          declaration,
-          options.sourceInlineMaxLines ?? 40,
+      for (const declaration of result.declarations)
+        declarationNodes.push(
+          this.#node(
+            options.repoHash,
+            declaration,
+            options.sourceInlineMaxLines ?? 40,
+          ),
         );
-        const saved = this.#repository.createNode(node);
-        if (saved.isErr()) return databaseFailure(saved.error);
-        indexedNodes++;
-      }
     }
+    const declarationsSaved = this.#repository.createNodes(declarationNodes);
+    if (declarationsSaved.isErr())
+      return databaseFailure(declarationsSaved.error);
     const eventWiki = db.run(
       "DELETE FROM wiki_pages WHERE path IN (SELECT id FROM nodes WHERE repo_hash = ? AND kind = 'event')",
       [options.repoHash],
@@ -247,16 +251,18 @@ export class ProjectIndexer implements ProjectIndexerContract {
     });
     const linked = this.#link(options, parsed, nodesResult.value);
     if (linked.isErr()) return rollback(linked);
-    for (const node of linked.value.nodes) {
-      const saved = this.#repository.createNode(node);
-      if (saved.isErr()) return databaseFailure(saved.error);
-      indexedNodes++;
-    }
-    for (const edge of linked.value.edges) {
-      const saved = this.#repository.createEdge(edge);
-      if (saved.isErr()) return databaseFailure(saved.error);
-    }
-    const persisted = this.#persistState(options, parsed, hashes, deleted);
+    const virtualNodesSaved = this.#repository.createNodes(linked.value.nodes);
+    if (virtualNodesSaved.isErr())
+      return databaseFailure(virtualNodesSaved.error);
+    const edgesSaved = this.#repository.createEdges(linked.value.edges);
+    if (edgesSaved.isErr()) return databaseFailure(edgesSaved.error);
+    const persisted = this.#persistState(
+      options,
+      parsed,
+      hashes,
+      deleted,
+      filesToParse,
+    );
     if (persisted.isErr()) return rollback(persisted);
     const counts = db.get<{ nodes: number; files: number }>(
       'SELECT (SELECT COUNT(*) FROM nodes WHERE repo_hash = ?) AS nodes, (SELECT COUNT(*) FROM file_manifest WHERE repo_hash = ?) AS files',
@@ -276,7 +282,7 @@ export class ProjectIndexer implements ProjectIndexerContract {
     if (committed.isErr()) return databaseFailure(committed.error);
     return ok({
       indexedFiles: filesToParse.length,
-      indexedNodes,
+      indexedNodes: declarationNodes.length + linked.value.nodes.length,
       indexedEdges: linked.value.edges.length,
       diagnostics: batch.value.diagnostics,
       changedFiles: changed.length,
@@ -542,12 +548,14 @@ export class ProjectIndexer implements ProjectIndexerContract {
     parsed: Map<string, ParseResult>,
     hashes: Map<string, { hash: string; mtime: number }>,
     deleted: readonly string[],
+    filesToPersist: readonly string[],
   ) {
     const db = this.#repository.database;
-    for (const file of deleted) {
+    if (deleted.length > 0) {
+      const placeholders = deleted.map(() => '?').join(',');
       const manifest = db.run(
-        'DELETE FROM file_manifest WHERE repo_hash = ? AND file_path = ?',
-        [options.repoHash, file],
+        `DELETE FROM file_manifest WHERE repo_hash = ? AND file_path IN (${placeholders})`,
+        [options.repoHash, ...deleted],
       );
       if (manifest.isErr())
         return err(
@@ -556,8 +564,8 @@ export class ProjectIndexer implements ProjectIndexerContract {
           }),
         );
       const cache = db.run(
-        'DELETE FROM parse_cache WHERE repo_hash = ? AND file_path = ?',
-        [options.repoHash, file],
+        `DELETE FROM parse_cache WHERE repo_hash = ? AND file_path IN (${placeholders})`,
+        [options.repoHash, ...deleted],
       );
       if (cache.isErr())
         return err(
@@ -566,10 +574,18 @@ export class ProjectIndexer implements ProjectIndexerContract {
           }),
         );
     }
-    for (const [file, value] of hashes) {
+    const files = [...new Set(filesToPersist)];
+    const manifestChunkSize = 1_000;
+    for (let offset = 0; offset < files.length; offset += manifestChunkSize) {
+      const chunk = files.slice(offset, offset + manifestChunkSize);
+      const placeholders = chunk.map(() => '(?,?,?,?)').join(',');
+      const parameters = chunk.flatMap((file) => {
+        const value = hashes.get(file)!;
+        return [file, options.repoHash, value.hash, value.mtime];
+      });
       const manifest = db.run(
-        'INSERT OR REPLACE INTO file_manifest(file_path, repo_hash, content_hash, mtime) VALUES(?,?,?,?)',
-        [file, options.repoHash, value.hash, value.mtime],
+        `INSERT OR REPLACE INTO file_manifest(file_path, repo_hash, content_hash, mtime) VALUES ${placeholders}`,
+        parameters,
       );
       if (manifest.isErr())
         return err(
@@ -577,37 +593,38 @@ export class ProjectIndexer implements ProjectIndexerContract {
             cause: manifest.error,
           }),
         );
+    }
+    const cacheRows = files.flatMap((file) => {
       const result = parsed.get(file);
-      if (result) {
-        const cache = db.run(
-          'INSERT OR REPLACE INTO parse_cache(file_path, repo_hash, content_hash, data) VALUES(?,?,?,?)',
-          [file, options.repoHash, value.hash, JSON.stringify(result)],
+      const value = hashes.get(file);
+      return result && value
+        ? [[file, options.repoHash, value.hash, JSON.stringify(result)]]
+        : [];
+    });
+    const cacheChunkSize = 500;
+    for (let offset = 0; offset < cacheRows.length; offset += cacheChunkSize) {
+      const chunk = cacheRows.slice(offset, offset + cacheChunkSize);
+      const placeholders = chunk.map(() => '(?,?,?,?)').join(',');
+      const cache = db.run(
+        `INSERT OR REPLACE INTO parse_cache(file_path, repo_hash, content_hash, data) VALUES ${placeholders}`,
+        chunk.flat(),
+      );
+      if (cache.isErr())
+        return err(
+          toIndexerError(IndexerErrorKind.DatabaseFailed, {
+            cause: cache.error,
+          }),
         );
-        if (cache.isErr())
-          return err(
-            toIndexerError(IndexerErrorKind.DatabaseFailed, {
-              cause: cache.error,
-            }),
-          );
-      }
     }
     return ok(undefined);
   }
 
-  async #node(
+  #node(
     repoHash: string,
     declaration: Declaration,
     inlineLimit: number,
-  ): Promise<NodeInfo> {
-    let lines = this.#sourceCache.get(declaration.filePath);
-    if (!lines) {
-      try {
-        lines = (await readFile(declaration.filePath, 'utf8')).split(/\r?\n/);
-      } catch {
-        lines = [];
-      }
-      this.#sourceCache.set(declaration.filePath, lines);
-    }
+  ): NodeInfo {
+    const lines = this.#sourceCache.get(declaration.filePath) ?? [];
     const count = declaration.range.end.line - declaration.range.start.line + 1;
     const source =
       count <= inlineLimit
@@ -672,6 +689,10 @@ export class ProjectIndexer implements ProjectIndexerContract {
           readFile(filePath),
           stat(filePath),
         ]);
+        this.#sourceCache.set(
+          filePath,
+          content.toString('utf8').split(/\r?\n/),
+        );
         return {
           hash: createHash('sha256').update(content).digest('hex'),
           mtime: Math.floor(info.mtimeMs),

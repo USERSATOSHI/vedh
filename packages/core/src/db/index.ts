@@ -15,6 +15,7 @@ export const DEFAULT_SOURCE_INLINE_MAX_LINES = 40;
 export class CoreDatabase implements CoreDatabaseContract {
   readonly #database: Database.Database;
   readonly #databasePath: string;
+  readonly #statements = new Map<string, Database.Statement>();
   #closed = false;
 
   private constructor(database: Database.Database, databasePath: string) {
@@ -104,7 +105,7 @@ export class CoreDatabase implements CoreDatabaseContract {
       return err(toCoreDatabaseError(CoreDatabaseErrorKind.Closed, {}));
     return safeCall(
       () => {
-        const result = this.#database.prepare(sql).run(...parameters);
+        const result = this.#statement(sql).run(...parameters);
         return {
           changes: result.changes,
           lastInsertRowid: result.lastInsertRowid,
@@ -119,9 +120,7 @@ export class CoreDatabase implements CoreDatabaseContract {
     if (this.#closed)
       return err(toCoreDatabaseError(CoreDatabaseErrorKind.Closed, {}));
     return safeCall(
-      () =>
-        (this.#database.prepare(sql).get(...parameters) as T | undefined) ??
-        null,
+      () => (this.#statement(sql).get(...parameters) as T | undefined) ?? null,
       (cause) =>
         toCoreDatabaseError(CoreDatabaseErrorKind.QueryFailed, { sql, cause }),
     );
@@ -131,7 +130,7 @@ export class CoreDatabase implements CoreDatabaseContract {
     if (this.#closed)
       return err(toCoreDatabaseError(CoreDatabaseErrorKind.Closed, {}));
     return safeCall(
-      () => this.#database.prepare(sql).all(...parameters) as T[],
+      () => this.#statement(sql).all(...parameters) as T[],
       (cause) =>
         toCoreDatabaseError(CoreDatabaseErrorKind.QueryFailed, { sql, cause }),
     );
@@ -141,6 +140,7 @@ export class CoreDatabase implements CoreDatabaseContract {
     if (this.#closed) return ok(undefined);
     const closed = safeCall(
       () => {
+        this.#statements.clear();
         this.#database.close();
         this.#closed = true;
       },
@@ -151,6 +151,18 @@ export class CoreDatabase implements CoreDatabaseContract {
         }),
     );
     return closed;
+  }
+
+  #statement(sql: string): Database.Statement {
+    const cached = this.#statements.get(sql);
+    if (cached) return cached;
+    const statement = this.#database.prepare(sql);
+    if (this.#statements.size >= 128) {
+      const oldest = this.#statements.keys().next().value;
+      if (oldest) this.#statements.delete(oldest);
+    }
+    this.#statements.set(sql, statement);
+    return statement;
   }
 
   #ensureSchema() {

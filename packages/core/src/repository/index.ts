@@ -43,9 +43,17 @@ export class GraphRepository implements GraphRepositoryContract {
   }
 
   createNode(node: NodeInfo) {
-    const result = this.#db.run(
-      'INSERT OR REPLACE INTO nodes (id,name,kind,file_path,line_start,line_end,column_start,column_end,offset_start,offset_end,repo_hash,parent_id,hierarchy_level,metadata_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
-      [
+    return this.createNodes([node]);
+  }
+
+  createNodes(nodes: readonly NodeInfo[]) {
+    const chunkSize = 400;
+    for (let offset = 0; offset < nodes.length; offset += chunkSize) {
+      const chunk = nodes.slice(offset, offset + chunkSize);
+      const placeholders = chunk
+        .map(() => '(?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+        .join(',');
+      const parameters = chunk.flatMap((node) => [
         node.id,
         node.name,
         node.kind,
@@ -60,16 +68,27 @@ export class GraphRepository implements GraphRepositoryContract {
         node.parent_id,
         node.hierarchy_level,
         JSON.stringify(node.metadata),
-      ],
+      ]);
+      const result = this.#db.run(
+        `INSERT OR REPLACE INTO nodes (id,name,kind,file_path,line_start,line_end,column_start,column_end,offset_start,offset_end,repo_hash,parent_id,hierarchy_level,metadata_json) VALUES ${placeholders}`,
+        parameters,
+      );
+      if (result.isErr()) return result;
+    }
+    return this.createEdges(
+      nodes.flatMap((node) =>
+        node.parent_id
+          ? [
+              {
+                source: node.parent_id,
+                target: node.id,
+                type: 'contains',
+                weight: 1,
+              },
+            ]
+          : [],
+      ),
     );
-    if (result.isErr()) return result;
-    if (!node.parent_id) return ok(undefined);
-    return this.createEdge({
-      source: node.parent_id,
-      target: node.id,
-      type: 'contains',
-      weight: 1,
-    });
   }
 
   getNode(id: string) {
@@ -93,17 +112,28 @@ export class GraphRepository implements GraphRepositoryContract {
   }
 
   createEdge(edge: EdgeInfo) {
-    const result = this.#db.run(
-      'INSERT OR REPLACE INTO edges (source,target,type,weight,metadata_json) VALUES (?,?,?,?,?)',
-      [
+    return this.createEdges([edge]);
+  }
+
+  createEdges(edges: readonly EdgeInfo[]) {
+    const chunkSize = 1_000;
+    for (let offset = 0; offset < edges.length; offset += chunkSize) {
+      const chunk = edges.slice(offset, offset + chunkSize);
+      const placeholders = chunk.map(() => '(?,?,?,?,?)').join(',');
+      const parameters = chunk.flatMap((edge) => [
         edge.source,
         edge.target,
         edge.type,
         edge.weight,
         edge.metadata_json ?? '{}',
-      ],
-    );
-    return result.isErr() ? result : ok(undefined);
+      ]);
+      const result = this.#db.run(
+        `INSERT OR REPLACE INTO edges (source,target,type,weight,metadata_json) VALUES ${placeholders}`,
+        parameters,
+      );
+      if (result.isErr()) return result;
+    }
+    return ok(undefined);
   }
 
   getEdges(nodeId: string) {

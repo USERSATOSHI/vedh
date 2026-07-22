@@ -1671,6 +1671,7 @@ import { join as join2 } from "node:path";
 class CoreDatabase {
   #database;
   #databasePath;
+  #statements = new Map;
   #closed = false;
   constructor(database, databasePath) {
     this.#database = database;
@@ -1730,7 +1731,7 @@ class CoreDatabase {
     if (this.#closed)
       return err(toCoreDatabaseError(CoreDatabaseErrorKind.Closed, {}));
     return safeCall(() => {
-      const result = this.#database.prepare(sql).run(...parameters);
+      const result = this.#statement(sql).run(...parameters);
       return {
         changes: result.changes,
         lastInsertRowid: result.lastInsertRowid
@@ -1740,17 +1741,18 @@ class CoreDatabase {
   get(sql, parameters = []) {
     if (this.#closed)
       return err(toCoreDatabaseError(CoreDatabaseErrorKind.Closed, {}));
-    return safeCall(() => this.#database.prepare(sql).get(...parameters) ?? null, (cause) => toCoreDatabaseError(CoreDatabaseErrorKind.QueryFailed, { sql, cause }));
+    return safeCall(() => this.#statement(sql).get(...parameters) ?? null, (cause) => toCoreDatabaseError(CoreDatabaseErrorKind.QueryFailed, { sql, cause }));
   }
   all(sql, parameters = []) {
     if (this.#closed)
       return err(toCoreDatabaseError(CoreDatabaseErrorKind.Closed, {}));
-    return safeCall(() => this.#database.prepare(sql).all(...parameters), (cause) => toCoreDatabaseError(CoreDatabaseErrorKind.QueryFailed, { sql, cause }));
+    return safeCall(() => this.#statement(sql).all(...parameters), (cause) => toCoreDatabaseError(CoreDatabaseErrorKind.QueryFailed, { sql, cause }));
   }
   close() {
     if (this.#closed)
       return ok(undefined);
     const closed = safeCall(() => {
+      this.#statements.clear();
       this.#database.close();
       this.#closed = true;
     }, (cause) => toCoreDatabaseError(CoreDatabaseErrorKind.QueryFailed, {
@@ -1758,6 +1760,19 @@ class CoreDatabase {
       cause
     }));
     return closed;
+  }
+  #statement(sql) {
+    const cached = this.#statements.get(sql);
+    if (cached)
+      return cached;
+    const statement = this.#database.prepare(sql);
+    if (this.#statements.size >= 128) {
+      const oldest = this.#statements.keys().next().value;
+      if (oldest)
+        this.#statements.delete(oldest);
+    }
+    this.#statements.set(sql, statement);
+    return statement;
   }
   #ensureSchema() {
     return safeCall(() => {
@@ -1837,32 +1852,41 @@ class GraphRepository {
     return result.isErr() ? result : ok(undefined);
   }
   createNode(node) {
-    const result = this.#db.run("INSERT OR REPLACE INTO nodes (id,name,kind,file_path,line_start,line_end,column_start,column_end,offset_start,offset_end,repo_hash,parent_id,hierarchy_level,metadata_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", [
-      node.id,
-      node.name,
-      node.kind,
-      node.file_path,
-      node.line_start,
-      node.line_end,
-      node.column_start ?? null,
-      node.column_end ?? null,
-      node.offset_start ?? null,
-      node.offset_end ?? null,
-      node.repo_hash,
-      node.parent_id,
-      node.hierarchy_level,
-      JSON.stringify(node.metadata)
-    ]);
-    if (result.isErr())
-      return result;
-    if (!node.parent_id)
-      return ok(undefined);
-    return this.createEdge({
-      source: node.parent_id,
-      target: node.id,
-      type: "contains",
-      weight: 1
-    });
+    return this.createNodes([node]);
+  }
+  createNodes(nodes) {
+    const chunkSize = 400;
+    for (let offset = 0;offset < nodes.length; offset += chunkSize) {
+      const chunk = nodes.slice(offset, offset + chunkSize);
+      const placeholders = chunk.map(() => "(?,?,?,?,?,?,?,?,?,?,?,?,?,?)").join(",");
+      const parameters = chunk.flatMap((node) => [
+        node.id,
+        node.name,
+        node.kind,
+        node.file_path,
+        node.line_start,
+        node.line_end,
+        node.column_start ?? null,
+        node.column_end ?? null,
+        node.offset_start ?? null,
+        node.offset_end ?? null,
+        node.repo_hash,
+        node.parent_id,
+        node.hierarchy_level,
+        JSON.stringify(node.metadata)
+      ]);
+      const result = this.#db.run(`INSERT OR REPLACE INTO nodes (id,name,kind,file_path,line_start,line_end,column_start,column_end,offset_start,offset_end,repo_hash,parent_id,hierarchy_level,metadata_json) VALUES ${placeholders}`, parameters);
+      if (result.isErr())
+        return result;
+    }
+    return this.createEdges(nodes.flatMap((node) => node.parent_id ? [
+      {
+        source: node.parent_id,
+        target: node.id,
+        type: "contains",
+        weight: 1
+      }
+    ] : []));
   }
   getNode(id) {
     const result = this.#db.get("SELECT * FROM nodes WHERE id = ? LIMIT 1", [id]);
@@ -1873,14 +1897,25 @@ class GraphRepository {
     return result.isErr() ? result : ok(result.value.map((node) => this.#toNode(node)));
   }
   createEdge(edge) {
-    const result = this.#db.run("INSERT OR REPLACE INTO edges (source,target,type,weight,metadata_json) VALUES (?,?,?,?,?)", [
-      edge.source,
-      edge.target,
-      edge.type,
-      edge.weight,
-      edge.metadata_json ?? "{}"
-    ]);
-    return result.isErr() ? result : ok(undefined);
+    return this.createEdges([edge]);
+  }
+  createEdges(edges) {
+    const chunkSize = 1000;
+    for (let offset = 0;offset < edges.length; offset += chunkSize) {
+      const chunk = edges.slice(offset, offset + chunkSize);
+      const placeholders = chunk.map(() => "(?,?,?,?,?)").join(",");
+      const parameters = chunk.flatMap((edge) => [
+        edge.source,
+        edge.target,
+        edge.type,
+        edge.weight,
+        edge.metadata_json ?? "{}"
+      ]);
+      const result = this.#db.run(`INSERT OR REPLACE INTO edges (source,target,type,weight,metadata_json) VALUES ${placeholders}`, parameters);
+      if (result.isErr())
+        return result;
+    }
+    return ok(undefined);
   }
   getEdges(nodeId) {
     return this.#db.all("SELECT * FROM edges WHERE source = ? OR target = ?", [nodeId, nodeId]);
@@ -2700,7 +2735,7 @@ class ProjectIndexer {
     }
     const deleted = [...prior.keys()].filter((file) => !hashes.has(file));
     const changed = options.files.filter((file) => prior.get(file)?.content_hash !== hashes.get(file)?.hash);
-    for (const file of [...changed, ...deleted])
+    for (const file of deleted)
       this.#sourceCache.delete(file);
     const fullRebuild = Boolean(options.fullRebuild || !prior.size || snapshotResult.value?.schema_version !== schemaVersion);
     const filesToParse = fullRebuild ? [...options.files] : [...new Set([...changed])];
@@ -2724,6 +2759,10 @@ class ProjectIndexer {
         if (!cached.has(file) && !filesToParse.includes(file))
           filesToParse.push(file);
     }
+    const parsedFiles = new Set(filesToParse);
+    for (const file of this.#sourceCache.keys())
+      if (!parsedFiles.has(file))
+        this.#sourceCache.delete(file);
     if (options.signal?.aborted)
       return err(toIndexerError(IndexerErrorKind.Aborted, {}));
     options.onProgress?.({
@@ -2766,19 +2805,17 @@ class ProjectIndexer {
     const clear = this.#clearChanged(options.repoHash, fullRebuild ? options.files.concat(deleted) : changed.concat(deleted), fullRebuild);
     if (clear.isErr())
       return rollback(clear);
-    let indexedNodes = 0;
+    const declarationNodes = [];
     for (const file of filesToParse) {
       const result = parsed.get(file);
       if (!result)
         continue;
-      for (const declaration of result.declarations) {
-        const node = await this.#node(options.repoHash, declaration, options.sourceInlineMaxLines ?? 40);
-        const saved = this.#repository.createNode(node);
-        if (saved.isErr())
-          return databaseFailure(saved.error);
-        indexedNodes++;
-      }
+      for (const declaration of result.declarations)
+        declarationNodes.push(this.#node(options.repoHash, declaration, options.sourceInlineMaxLines ?? 40));
     }
+    const declarationsSaved = this.#repository.createNodes(declarationNodes);
+    if (declarationsSaved.isErr())
+      return databaseFailure(declarationsSaved.error);
     const eventWiki = db.run("DELETE FROM wiki_pages WHERE path IN (SELECT id FROM nodes WHERE repo_hash = ? AND kind = 'event')", [options.repoHash]);
     if (eventWiki.isErr())
       return databaseFailure(eventWiki.error);
@@ -2801,18 +2838,13 @@ class ProjectIndexer {
     const linked = this.#link(options, parsed, nodesResult.value);
     if (linked.isErr())
       return rollback(linked);
-    for (const node of linked.value.nodes) {
-      const saved = this.#repository.createNode(node);
-      if (saved.isErr())
-        return databaseFailure(saved.error);
-      indexedNodes++;
-    }
-    for (const edge of linked.value.edges) {
-      const saved = this.#repository.createEdge(edge);
-      if (saved.isErr())
-        return databaseFailure(saved.error);
-    }
-    const persisted = this.#persistState(options, parsed, hashes, deleted);
+    const virtualNodesSaved = this.#repository.createNodes(linked.value.nodes);
+    if (virtualNodesSaved.isErr())
+      return databaseFailure(virtualNodesSaved.error);
+    const edgesSaved = this.#repository.createEdges(linked.value.edges);
+    if (edgesSaved.isErr())
+      return databaseFailure(edgesSaved.error);
+    const persisted = this.#persistState(options, parsed, hashes, deleted, filesToParse);
     if (persisted.isErr())
       return rollback(persisted);
     const counts = db.get("SELECT (SELECT COUNT(*) FROM nodes WHERE repo_hash = ?) AS nodes, (SELECT COUNT(*) FROM file_manifest WHERE repo_hash = ?) AS files", [options.repoHash, options.repoHash]);
@@ -2832,7 +2864,7 @@ class ProjectIndexer {
       return databaseFailure(committed.error);
     return ok({
       indexedFiles: filesToParse.length,
-      indexedNodes,
+      indexedNodes: declarationNodes.length + linked.value.nodes.length,
       indexedEdges: linked.value.edges.length,
       diagnostics: batch.value.diagnostics,
       changedFiles: changed.length,
@@ -3012,47 +3044,55 @@ class ProjectIndexer {
     }));
     return ok({ nodes: [...virtualNodes.values()], edges });
   }
-  #persistState(options, parsed, hashes, deleted) {
+  #persistState(options, parsed, hashes, deleted, filesToPersist) {
     const db = this.#repository.database;
-    for (const file of deleted) {
-      const manifest = db.run("DELETE FROM file_manifest WHERE repo_hash = ? AND file_path = ?", [options.repoHash, file]);
+    if (deleted.length > 0) {
+      const placeholders = deleted.map(() => "?").join(",");
+      const manifest = db.run(`DELETE FROM file_manifest WHERE repo_hash = ? AND file_path IN (${placeholders})`, [options.repoHash, ...deleted]);
       if (manifest.isErr())
         return err(toIndexerError(IndexerErrorKind.DatabaseFailed, {
           cause: manifest.error
         }));
-      const cache = db.run("DELETE FROM parse_cache WHERE repo_hash = ? AND file_path = ?", [options.repoHash, file]);
+      const cache = db.run(`DELETE FROM parse_cache WHERE repo_hash = ? AND file_path IN (${placeholders})`, [options.repoHash, ...deleted]);
       if (cache.isErr())
         return err(toIndexerError(IndexerErrorKind.DatabaseFailed, {
           cause: cache.error
         }));
     }
-    for (const [file, value] of hashes) {
-      const manifest = db.run("INSERT OR REPLACE INTO file_manifest(file_path, repo_hash, content_hash, mtime) VALUES(?,?,?,?)", [file, options.repoHash, value.hash, value.mtime]);
+    const files = [...new Set(filesToPersist)];
+    const manifestChunkSize = 1000;
+    for (let offset = 0;offset < files.length; offset += manifestChunkSize) {
+      const chunk = files.slice(offset, offset + manifestChunkSize);
+      const placeholders = chunk.map(() => "(?,?,?,?)").join(",");
+      const parameters = chunk.flatMap((file) => {
+        const value = hashes.get(file);
+        return [file, options.repoHash, value.hash, value.mtime];
+      });
+      const manifest = db.run(`INSERT OR REPLACE INTO file_manifest(file_path, repo_hash, content_hash, mtime) VALUES ${placeholders}`, parameters);
       if (manifest.isErr())
         return err(toIndexerError(IndexerErrorKind.DatabaseFailed, {
           cause: manifest.error
         }));
+    }
+    const cacheRows = files.flatMap((file) => {
       const result = parsed.get(file);
-      if (result) {
-        const cache = db.run("INSERT OR REPLACE INTO parse_cache(file_path, repo_hash, content_hash, data) VALUES(?,?,?,?)", [file, options.repoHash, value.hash, JSON.stringify(result)]);
-        if (cache.isErr())
-          return err(toIndexerError(IndexerErrorKind.DatabaseFailed, {
-            cause: cache.error
-          }));
-      }
+      const value = hashes.get(file);
+      return result && value ? [[file, options.repoHash, value.hash, JSON.stringify(result)]] : [];
+    });
+    const cacheChunkSize = 500;
+    for (let offset = 0;offset < cacheRows.length; offset += cacheChunkSize) {
+      const chunk = cacheRows.slice(offset, offset + cacheChunkSize);
+      const placeholders = chunk.map(() => "(?,?,?,?)").join(",");
+      const cache = db.run(`INSERT OR REPLACE INTO parse_cache(file_path, repo_hash, content_hash, data) VALUES ${placeholders}`, chunk.flat());
+      if (cache.isErr())
+        return err(toIndexerError(IndexerErrorKind.DatabaseFailed, {
+          cause: cache.error
+        }));
     }
     return ok(undefined);
   }
-  async#node(repoHash, declaration, inlineLimit) {
-    let lines = this.#sourceCache.get(declaration.filePath);
-    if (!lines) {
-      try {
-        lines = (await readFile2(declaration.filePath, "utf8")).split(/\r?\n/);
-      } catch {
-        lines = [];
-      }
-      this.#sourceCache.set(declaration.filePath, lines);
-    }
+  #node(repoHash, declaration, inlineLimit) {
+    const lines = this.#sourceCache.get(declaration.filePath) ?? [];
     const count = declaration.range.end.line - declaration.range.start.line + 1;
     const source = count <= inlineLimit ? lines.slice(declaration.range.start.line - 1, declaration.range.end.line).join(`
 `) : "";
@@ -3095,6 +3135,7 @@ class ProjectIndexer {
         readFile2(filePath),
         stat(filePath)
       ]);
+      this.#sourceCache.set(filePath, content.toString("utf8").split(/\r?\n/));
       return {
         hash: createHash("sha256").update(content).digest("hex"),
         mtime: Math.floor(info.mtimeMs)
@@ -8695,4 +8736,4 @@ ${this.#describeCause(cause.cause)}` : "";
 // packages/cli/src/bin.ts
 await new VedhCli().run(process.argv.slice(2));
 
-//# debugId=6B01B84F87A162A764756E2164756E21
+//# debugId=5B8D452BA1079B3564756E2164756E21

@@ -25,6 +25,42 @@ afterEach(() => {
 });
 
 describe('ProjectIndexer', () => {
+  test('writes declarations across bulk-insert chunk boundaries', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'vedh-bulk-index-'));
+    roots.push(root);
+    const file = join(root, 'many.ts');
+    writeFileSync(
+      file,
+      Array.from(
+        { length: 450 },
+        (_, index) => `export function declaration${index}() {}`,
+      ).join('\n'),
+    );
+    const repoHash = 'bulk-repo';
+    const opened = CoreDatabase.open({
+      repoHash,
+      projectDir: root,
+      dataDir: join(root, 'data'),
+    });
+    assert.equal(opened.isOk(), true);
+    const db = opened.value!;
+    const parser = new ParserEngine({ parallelism: false });
+    const indexed = await new ProjectIndexer(
+      new GraphRepository(db),
+      parser,
+    ).index({ repoHash, projectDir: root, files: [file] });
+    assert.equal(indexed.isOk(), true);
+    assert.equal(
+      db.get<{ count: number }>(
+        'SELECT COUNT(*) AS count FROM nodes WHERE repo_hash=?',
+        [repoHash],
+      ).value!.count > 400,
+      true,
+    );
+    db.close();
+    parser.dispose();
+  });
+
   test('increments deterministically, links calls, and removes deleted files', async () => {
     const root = mkdtempSync(join(tmpdir(), 'vedh-index-'));
     roots.push(root);

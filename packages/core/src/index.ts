@@ -1,6 +1,5 @@
 export {
   CoreDatabase,
-  DEFAULT_SOURCE_INLINE_MAX_LINES,
   CoreDatabaseErrorKind,
   toCoreDatabaseErr,
   toCoreDatabaseError,

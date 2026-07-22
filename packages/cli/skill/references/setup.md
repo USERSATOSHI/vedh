@@ -40,7 +40,6 @@ Use `.vedh/config.json` for deterministic settings:
 ```json
 {
   "local": true,
-  "sourceInlineMaxLines": 40,
   "domains": {
     "core": ["packages/core/**"],
     "cli": ["packages/cli/**"]
@@ -48,8 +47,7 @@ Use `.vedh/config.json` for deterministic settings:
 }
 ```
 
-`VEDH_SOURCE_INLINE_MAX_LINES` overrides the inline-source threshold. Named
-query scopes live separately in `.vedh/tiers.json`.
+Named query scopes live separately in `.vedh/tiers.json`.
 
 Vedh respects `.gitignore`, `.vedhignore`, and the legacy `.michiignore`
 compatibility file during discovery.

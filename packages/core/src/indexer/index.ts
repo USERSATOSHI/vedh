@@ -20,7 +20,8 @@ import {
 } from './type.js';
 import { toIndexerError } from './error.js';
 
-export const INDEX_SCHEMA_VERSION = '7';
+export const INDEX_SCHEMA_VERSION = '8';
+const DOC_CONTEXT_MAX_CHARACTERS = 16_384;
 
 interface ManifestRow {
   file_path: string;
@@ -229,13 +230,7 @@ export class ProjectIndexer implements ProjectIndexerContract {
       const result = parsed.get(file);
       if (!result) continue;
       for (const declaration of result.declarations)
-        declarationNodes.push(
-          this.#node(
-            options.repoHash,
-            declaration,
-            options.sourceInlineMaxLines ?? 40,
-          ),
-        );
+        declarationNodes.push(this.#node(options.repoHash, declaration));
     }
     this.#sourceCache.clear();
     options.onProgress?.({
@@ -654,25 +649,13 @@ export class ProjectIndexer implements ProjectIndexerContract {
     return ok(undefined);
   }
 
-  #node(
-    repoHash: string,
-    declaration: Declaration,
-    inlineLimit: number,
-  ): NodeInfo {
+  #node(repoHash: string, declaration: Declaration): NodeInfo {
     const lines = this.#sourceCache.get(declaration.filePath) ?? [];
-    const count = declaration.range.end.line - declaration.range.start.line + 1;
-    const source =
-      count <= inlineLimit
-        ? lines
-            .slice(declaration.range.start.line - 1, declaration.range.end.line)
-            .join('\n')
-        : '';
-    const leading = lines
-      .slice(
-        Math.max(0, declaration.range.start.line - 8),
-        declaration.range.start.line - 1,
-      )
-      .join('\n');
+    const leading = this.#joinLinesWithinLimit(
+      lines,
+      Math.max(0, declaration.range.start.line - 8),
+      declaration.range.start.line - 1,
+    );
     const blockMatches = [...leading.matchAll(/\/\*\*[\s\S]*?\*\//g)];
     const lastBlock = blockMatches.at(-1);
     const blockDoc =
@@ -681,7 +664,7 @@ export class ProjectIndexer implements ProjectIndexerContract {
         ? lastBlock[0]
         : '';
     const lineDoc = /\.py$/i.test(declaration.filePath)
-      ? (leading.match(/(?:^|\n)(?:\s*#.*\n?)+$/)?.[0]?.trim() ?? '')
+      ? this.#pythonLineDoc(leading)
       : '';
     const doc = blockDoc || lineDoc;
     return {
@@ -701,7 +684,6 @@ export class ProjectIndexer implements ProjectIndexerContract {
       metadata: {
         ...declaration.metadata,
         depth: declaration.depth,
-        source_code: source,
         doc,
         summary:
           doc.replace(/^[\s/*#-]+|[\s/*#-]+$/g, '').split(/\r?\n/)[0] ?? '',
@@ -715,6 +697,37 @@ export class ProjectIndexer implements ProjectIndexerContract {
       .sort(
         (a, b) => a.line_end - a.line_start - (b.line_end - b.line_start),
       )[0];
+  }
+
+  #joinLinesWithinLimit(
+    lines: readonly string[],
+    start: number,
+    end: number,
+  ): string {
+    const selected: string[] = [];
+    let characters = 0;
+    for (
+      let index = Math.max(0, start);
+      index < Math.min(lines.length, end);
+      index++
+    ) {
+      const line = lines[index] ?? '';
+      characters += line.length + (selected.length > 0 ? 1 : 0);
+      if (characters > DOC_CONTEXT_MAX_CHARACTERS) return '';
+      selected.push(line);
+    }
+    return selected.join('\n');
+  }
+
+  #pythonLineDoc(leading: string): string {
+    const lines = leading.split('\n');
+    const comments: string[] = [];
+    for (let index = lines.length - 1; index >= 0; index--) {
+      const line = lines[index] ?? '';
+      if (!line.trimStart().startsWith('#')) break;
+      comments.push(line);
+    }
+    return comments.reverse().join('\n').trim();
   }
 
   #secondsSince(startedAt: number): string {

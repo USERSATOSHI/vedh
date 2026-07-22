@@ -497,7 +497,6 @@ export class VedhCli implements VedhCliContract {
       url: projectDir,
       name: basename(projectDir),
       fullRebuild: flags.full,
-      sourceInlineMaxLines: this.#sourceInlineMaxLines(config),
       workspacePackages: discovered.workspacePackages,
       onProgress: ({ message }) => this.#stdout(`◇  ${message}`),
     });
@@ -746,18 +745,6 @@ export class VedhCli implements VedhCliContract {
       extensions.push(loaded.value.default);
     }
     return ok(extensions);
-  }
-  #sourceInlineMaxLines(config: {
-    sourceInlineMaxLines?: number;
-  }): number | undefined {
-    const configured = process.env.VEDH_SOURCE_INLINE_MAX_LINES;
-    const value =
-      configured === undefined
-        ? config.sourceInlineMaxLines
-        : Number(configured);
-    return typeof value === 'number' && Number.isFinite(value) && value >= 0
-      ? Math.floor(value)
-      : undefined;
   }
   #eventCalls(extensions: readonly VedhExtension[]) {
     return extensions.reduce(

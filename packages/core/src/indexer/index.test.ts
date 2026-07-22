@@ -25,6 +25,75 @@ afterEach(() => {
 });
 
 describe('ProjectIndexer', () => {
+  test('extracts consecutive Python comment documentation', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'vedh-python-doc-'));
+    roots.push(root);
+    const file = join(root, 'documented.py');
+    writeFileSync(
+      file,
+      '# First documentation line.\n# Second documentation line.\ndef documented():\n    return 1\n',
+    );
+    const repoHash = 'python-doc-repo';
+    const opened = CoreDatabase.open({
+      repoHash,
+      projectDir: root,
+      dataDir: join(root, 'data'),
+    });
+    assert.equal(opened.isOk(), true);
+    const db = opened.value!;
+    const parser = new ParserEngine({ parallelism: false });
+    const indexed = await new ProjectIndexer(
+      new GraphRepository(db),
+      parser,
+    ).index({ repoHash, projectDir: root, files: [file] });
+    assert.equal(indexed.isOk(), true);
+    const metadata = db.get<{ metadata_json: string }>(
+      "SELECT metadata_json FROM nodes WHERE name='documented'",
+    ).value!;
+    assert.equal(
+      (JSON.parse(metadata.metadata_json) as { doc?: string }).doc,
+      '# First documentation line.\n# Second documentation line.',
+    );
+    db.close();
+    parser.dispose();
+  });
+
+  test('retrieves source on demand without persisting it inline', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'vedh-large-line-'));
+    roots.push(root);
+    const file = join(root, 'generated.js');
+    const source = `export function generated() { return '${'x'.repeat(20_000)}' }`;
+    writeFileSync(file, source);
+    const repoHash = 'large-line-repo';
+    const opened = CoreDatabase.open({
+      repoHash,
+      projectDir: root,
+      dataDir: join(root, 'data'),
+    });
+    assert.equal(opened.isOk(), true);
+    const db = opened.value!;
+    const parser = new ParserEngine({ parallelism: false });
+    const indexed = await new ProjectIndexer(
+      new GraphRepository(db),
+      parser,
+    ).index({ repoHash, projectDir: root, files: [file] });
+    assert.equal(indexed.isOk(), true);
+    const generated = db.get<{ id: string; metadata_json: string }>(
+      "SELECT id,metadata_json FROM nodes WHERE name='generated'",
+    ).value!;
+    assert.equal(
+      'source_code' in
+        (JSON.parse(generated.metadata_json) as Record<string, unknown>),
+      false,
+    );
+    assert.equal(
+      new WikiService(db).source(generated.id).value,
+      source.slice('export '.length),
+    );
+    db.close();
+    parser.dispose();
+  });
+
   test('writes declarations across bulk-insert chunk boundaries', async () => {
     const root = mkdtempSync(join(tmpdir(), 'vedh-bulk-index-'));
     roots.push(root);
@@ -105,7 +174,6 @@ describe('ProjectIndexer', () => {
       url: root,
       name: 'fixture',
       workspacePackages: {},
-      sourceInlineMaxLines: 0,
     });
     assert.equal(first.isOk(), true);
     assert.equal(first.value!.fullRebuild, true);

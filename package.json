@@ -21,7 +21,7 @@
     "build:workspaces": "bun run --filter '*' build",
     "build:distribution": "bun scripts/build-distribution.ts",
     "typecheck": "bun run --filter '*' typecheck",
-    "test": "bun run build && node --test packages/parser/dist/resolver/index.test.js packages/parser/dist/engine/index.test.js packages/core/dist/indexer/index.test.js packages/core/dist/analysis/louvain.test.js",
+    "test": "bun run build && node --test packages/parser/dist/resolver/index.test.js packages/parser/dist/engine/index.test.js packages/core/dist/discovery/index.test.js packages/core/dist/indexer/index.test.js packages/core/dist/analysis/louvain.test.js",
     "lint": "eslint packages --max-warnings=0",
     "lint:fix": "eslint packages --fix",
     "format": "prettier --write .",

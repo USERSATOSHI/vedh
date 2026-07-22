@@ -123,6 +123,7 @@ export class KnowledgeService {
       [repoHash],
     );
     if (rows.isErr()) return 0;
+    const wiki = new WikiService(this.#db);
     let cursor = 0;
     let enriched = 0;
     const worker = async () => {
@@ -139,7 +140,8 @@ export class KnowledgeService {
         } catch {
           /* empty */
         }
-        const source = String(metadata.source_code ?? '');
+        const sourceResult = wiki.source(row.id);
+        const source = sourceResult.isOk() ? (sourceResult.value ?? '') : '';
         if (!source) continue;
         const answer = await this.#llm(
           `Summarize this ${row.kind} in one precise sentence. Describe behavior, not syntax.\n\n${source.slice(0, 8000)}`,

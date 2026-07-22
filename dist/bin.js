@@ -2155,7 +2155,7 @@ class SearchService {
     const cleared = this.#db.run("DELETE FROM node_search WHERE node_id IN (SELECT id FROM nodes WHERE repo_hash = ?)", [repoHash]);
     if (cleared.isErr())
       return cleared;
-    const inserted = this.#db.run("INSERT INTO node_search (node_id, name, kind, file_path, domain, summary, doc, source) SELECT id, name, kind, file_path, COALESCE(json_extract(metadata_json, '$.domain'), ''), COALESCE(json_extract(metadata_json, '$.summary'), ''), COALESCE(json_extract(metadata_json, '$.doc'), ''), COALESCE(json_extract(metadata_json, '$.source_code'), '') FROM nodes WHERE repo_hash = ?", [repoHash]);
+    const inserted = this.#db.run("INSERT INTO node_search (node_id, name, kind, file_path, domain, summary, doc, source) SELECT id, name, kind, file_path, COALESCE(json_extract(metadata_json, '$.domain'), ''), COALESCE(json_extract(metadata_json, '$.summary'), ''), COALESCE(json_extract(metadata_json, '$.doc'), ''), '' FROM nodes WHERE repo_hash = ?", [repoHash]);
     return inserted.isErr() ? inserted : ok(undefined);
   }
   search(repoHash, query) {
@@ -2825,7 +2825,7 @@ class ProjectIndexer {
       if (!result)
         continue;
       for (const declaration of result.declarations)
-        declarationNodes.push(this.#node(options.repoHash, declaration, options.sourceInlineMaxLines ?? 40));
+        declarationNodes.push(this.#node(options.repoHash, declaration));
     }
     this.#sourceCache.clear();
     options.onProgress?.({
@@ -3124,17 +3124,13 @@ class ProjectIndexer {
     }
     return ok(undefined);
   }
-  #node(repoHash, declaration, inlineLimit) {
+  #node(repoHash, declaration) {
     const lines = this.#sourceCache.get(declaration.filePath) ?? [];
-    const count = declaration.range.end.line - declaration.range.start.line + 1;
-    const source = count <= inlineLimit ? lines.slice(declaration.range.start.line - 1, declaration.range.end.line).join(`
-`) : "";
-    const leading = lines.slice(Math.max(0, declaration.range.start.line - 8), declaration.range.start.line - 1).join(`
-`);
+    const leading = this.#joinLinesWithinLimit(lines, Math.max(0, declaration.range.start.line - 8), declaration.range.start.line - 1);
     const blockMatches = [...leading.matchAll(/\/\*\*[\s\S]*?\*\//g)];
     const lastBlock = blockMatches.at(-1);
     const blockDoc = lastBlock && leading.slice((lastBlock.index ?? 0) + lastBlock[0].length).trim() === "" ? lastBlock[0] : "";
-    const lineDoc = /\.py$/i.test(declaration.filePath) ? leading.match(/(?:^|\n)(?:\s*#.*\n?)+$/)?.[0]?.trim() ?? "" : "";
+    const lineDoc = /\.py$/i.test(declaration.filePath) ? this.#pythonLineDoc(leading) : "";
     const doc = blockDoc || lineDoc;
     return {
       id: declaration.id,
@@ -3153,7 +3149,6 @@ class ProjectIndexer {
       metadata: {
         ...declaration.metadata,
         depth: declaration.depth,
-        source_code: source,
         doc,
         summary: doc.replace(/^[\s/*#-]+|[\s/*#-]+$/g, "").split(/\r?\n/)[0] ?? ""
       }
@@ -3161,6 +3156,32 @@ class ProjectIndexer {
   }
   #closest(nodes, line) {
     return nodes.filter((node) => node.line_start <= line && node.line_end >= line).sort((a, b) => a.line_end - a.line_start - (b.line_end - b.line_start))[0];
+  }
+  #joinLinesWithinLimit(lines, start, end) {
+    const selected = [];
+    let characters = 0;
+    for (let index = Math.max(0, start);index < Math.min(lines.length, end); index++) {
+      const line = lines[index] ?? "";
+      characters += line.length + (selected.length > 0 ? 1 : 0);
+      if (characters > DOC_CONTEXT_MAX_CHARACTERS)
+        return "";
+      selected.push(line);
+    }
+    return selected.join(`
+`);
+  }
+  #pythonLineDoc(leading) {
+    const lines = leading.split(`
+`);
+    const comments = [];
+    for (let index = lines.length - 1;index >= 0; index--) {
+      const line = lines[index] ?? "";
+      if (!line.trimStart().startsWith("#"))
+        break;
+      comments.push(line);
+    }
+    return comments.reverse().join(`
+`).trim();
   }
   #secondsSince(startedAt) {
     return `${((Date.now() - startedAt) / 1000).toFixed(2)}s`;
@@ -3197,7 +3218,7 @@ class ProjectIndexer {
     }));
   }
 }
-var INDEX_SCHEMA_VERSION = "7";
+var INDEX_SCHEMA_VERSION = "8", DOC_CONTEXT_MAX_CHARACTERS = 16384;
 var init_indexer = __esm(() => {
   init_esm();
   init_dist();
@@ -4727,6 +4748,7 @@ ${source}`).join(`
     const rows = this.#db.all(`SELECT id,name,kind,file_path,metadata_json FROM nodes WHERE repo_hash=? ${options.importsExportsOnly ? "AND kind IN ('module','export_statement')" : "AND kind!='event'"}`, [repoHash]);
     if (rows.isErr())
       return 0;
+    const wiki = new WikiService(this.#db);
     let cursor = 0;
     let enriched = 0;
     const worker = async () => {
@@ -4739,7 +4761,8 @@ ${source}`).join(`
         try {
           metadata = JSON.parse(row.metadata_json || "{}");
         } catch {}
-        const source = String(metadata.source_code ?? "");
+        const sourceResult = wiki.source(row.id);
+        const source = sourceResult.isOk() ? sourceResult.value ?? "" : "";
         if (!source)
           continue;
         const answer = await this.#llm(`Summarize this ${row.kind} in one precise sentence. Describe behavior, not syntax.
@@ -4847,21 +4870,28 @@ class ProjectDiscovery {
       }
     };
     visit(root);
-    const gitIgnored = this.#gitIgnored(root, files);
+    const gitIncluded = this.#gitIncluded(root);
     const workspaces = this.#workspaces(root);
     return {
-      files: files.filter((file) => !gitIgnored.has(file)).sort(),
+      files: files.filter((file) => !gitIncluded || gitIncluded.has(file)).sort(),
       workspaces,
       workspacePackages: Object.fromEntries(workspaces.map((workspace) => [workspace.name, workspace.directory]))
     };
   }
-  #gitIgnored(root, files) {
-    if (!existsSync3(join3(root, ".git")) || !files.length)
-      return new Set;
-    const relativeFiles = files.map((file) => relative2(root, file).split(sep).join("/"));
-    const result = spawnSync2("git", ["-C", root, "check-ignore", "--stdin", "-z"], { input: `${relativeFiles.join("\x00")}\x00`, encoding: "utf8" });
-    if (result.status !== 0 && result.status !== 1)
-      return new Set;
+  #gitIncluded(root) {
+    if (!existsSync3(join3(root, ".git")))
+      return null;
+    const result = spawnSync2("git", [
+      "-C",
+      root,
+      "ls-files",
+      "--cached",
+      "--others",
+      "--exclude-standard",
+      "-z"
+    ], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+    if (result.status !== 0)
+      return null;
     return new Set(result.stdout.split("\x00").filter(Boolean).map((file) => resolve2(root, file)));
   }
   projectRootForFile(filePath, result, fallback) {
@@ -4877,24 +4907,29 @@ class ProjectDiscovery {
       const path3 = join3(root, file);
       if (!existsSync3(path3))
         continue;
-      patterns.push(...readFileSync4(path3, "utf8").split(/\r?\n/).map((line) => line.trim()).filter((line) => line && !line.startsWith("#")));
+      for (const raw of readFileSync4(path3, "utf8").split(/\r?\n/).map((line) => line.trim()).filter((line) => line && !line.startsWith("#"))) {
+        const negated = raw.startsWith("!");
+        const pattern = negated ? raw.slice(1) : raw;
+        if (!pattern)
+          continue;
+        const directoryOnly = pattern.endsWith("/");
+        const clean = pattern.replace(/^\//, "").replace(/\/$/, "");
+        patterns.push({
+          negated,
+          directoryOnly,
+          regex: new RegExp(`^(?:.*/)?${clean.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*\*/g, "§§").replace(/\*/g, "[^/]*").replace(/§§/g, ".*")}(?:/.*)?$`)
+        });
+      }
     }
     return patterns;
   }
   #ignored(path3, directory, patterns) {
     let ignored = false;
-    for (const raw of patterns) {
-      const negated = raw.startsWith("!");
-      const pattern = negated ? raw.slice(1) : raw;
-      if (!pattern)
+    for (const pattern of patterns) {
+      if (pattern.directoryOnly && !directory)
         continue;
-      const directoryOnly = pattern.endsWith("/");
-      if (directoryOnly && !directory)
-        continue;
-      const clean = pattern.replace(/^\//, "").replace(/\/$/, "");
-      const regex = new RegExp(`^(?:.*/)?${clean.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*\*/g, "§§").replace(/\*/g, "[^/]*").replace(/§§/g, ".*")}(?:/.*)?$`);
-      if (regex.test(path3))
-        ignored = !negated;
+      if (pattern.regex.test(path3))
+        ignored = !pattern.negated;
     }
     return ignored;
   }
@@ -8517,7 +8552,6 @@ Operations:
       url: projectDir,
       name: basename4(projectDir),
       fullRebuild: flags.full,
-      sourceInlineMaxLines: this.#sourceInlineMaxLines(config),
       workspacePackages: discovered.workspacePackages,
       onProgress: ({ message }) => this.#stdout(`◇  ${message}`)
     });
@@ -8716,11 +8750,6 @@ Operations:
     }
     return ok(extensions);
   }
-  #sourceInlineMaxLines(config) {
-    const configured = process.env.VEDH_SOURCE_INLINE_MAX_LINES;
-    const value = configured === undefined ? config.sourceInlineMaxLines : Number(configured);
-    return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : undefined;
-  }
   #eventCalls(extensions) {
     return extensions.reduce((merged, extension4) => ({
       fires: { ...merged.fires, ...extension4.eventCalls?.fires },
@@ -8772,4 +8801,4 @@ ${this.#describeCause(cause.cause)}` : "";
 // packages/cli/src/bin.ts
 await new VedhCli().run(process.argv.slice(2));
 
-//# debugId=665EC5D2552F1FFC64756E2164756E21
+//# debugId=4AA9E197B579B51864756E2164756E21

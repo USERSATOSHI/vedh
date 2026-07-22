@@ -158,15 +158,12 @@ Optional deterministic index settings live in `.vedh/config.json`:
 ```json
 {
   "local": true,
-  "sourceInlineMaxLines": 40,
   "domains": {
     "parser": ["packages/parser/**"],
     "interfaces": ["packages/extension-*/**"]
   }
 }
 ```
-
-`VEDH_SOURCE_INLINE_MAX_LINES` overrides the configured inline-source limit.
 
 ## Development
 

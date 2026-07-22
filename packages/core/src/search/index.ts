@@ -33,7 +33,7 @@ export class SearchService implements SearchServiceContract {
     );
     if (cleared.isErr()) return cleared;
     const inserted = this.#db.run(
-      "INSERT INTO node_search (node_id, name, kind, file_path, domain, summary, doc, source) SELECT id, name, kind, file_path, COALESCE(json_extract(metadata_json, '$.domain'), ''), COALESCE(json_extract(metadata_json, '$.summary'), ''), COALESCE(json_extract(metadata_json, '$.doc'), ''), COALESCE(json_extract(metadata_json, '$.source_code'), '') FROM nodes WHERE repo_hash = ?",
+      "INSERT INTO node_search (node_id, name, kind, file_path, domain, summary, doc, source) SELECT id, name, kind, file_path, COALESCE(json_extract(metadata_json, '$.domain'), ''), COALESCE(json_extract(metadata_json, '$.summary'), ''), COALESCE(json_extract(metadata_json, '$.doc'), ''), '' FROM nodes WHERE repo_hash = ?",
       [repoHash],
     );
     return inserted.isErr() ? inserted : ok(undefined);

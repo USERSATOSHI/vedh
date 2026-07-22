@@ -24,6 +24,12 @@ export interface DiscoveryOptions {
   excludedDirectories?: readonly string[];
 }
 
+interface IgnorePattern {
+  negated: boolean;
+  directoryOnly: boolean;
+  regex: RegExp;
+}
+
 export class ProjectDiscovery {
   discover(projectRoot: string, options: DiscoveryOptions): DiscoveryResult {
     const root = resolve(projectRoot);
@@ -73,10 +79,12 @@ export class ProjectDiscovery {
       }
     };
     visit(root);
-    const gitIgnored = this.#gitIgnored(root, files);
+    const gitIncluded = this.#gitIncluded(root);
     const workspaces = this.#workspaces(root);
     return {
-      files: files.filter((file) => !gitIgnored.has(file)).sort(),
+      files: files
+        .filter((file) => !gitIncluded || gitIncluded.has(file))
+        .sort(),
       workspaces,
       workspacePackages: Object.fromEntries(
         workspaces.map((workspace) => [workspace.name, workspace.directory]),
@@ -84,17 +92,22 @@ export class ProjectDiscovery {
     };
   }
 
-  #gitIgnored(root: string, files: readonly string[]): Set<string> {
-    if (!existsSync(join(root, '.git')) || !files.length) return new Set();
-    const relativeFiles = files.map((file) =>
-      relative(root, file).split(sep).join('/'),
-    );
+  #gitIncluded(root: string): Set<string> | null {
+    if (!existsSync(join(root, '.git'))) return null;
     const result = spawnSync(
       'git',
-      ['-C', root, 'check-ignore', '--stdin', '-z'],
-      { input: `${relativeFiles.join('\0')}\0`, encoding: 'utf8' },
+      [
+        '-C',
+        root,
+        'ls-files',
+        '--cached',
+        '--others',
+        '--exclude-standard',
+        '-z',
+      ],
+      { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
     );
-    if (result.status !== 0 && result.status !== 1) return new Set();
+    if (result.status !== 0) return null;
     return new Set(
       result.stdout
         .split('\0')
@@ -125,17 +138,32 @@ export class ProjectDiscovery {
     return index < 0 ? '' : name.slice(index).toLowerCase();
   }
 
-  #ignorePatterns(root: string): string[] {
-    const patterns: string[] = [];
+  #ignorePatterns(root: string): IgnorePattern[] {
+    const patterns: IgnorePattern[] = [];
     for (const file of ['.gitignore', '.vedhignore', '.michiignore']) {
       const path = join(root, file);
       if (!existsSync(path)) continue;
-      patterns.push(
-        ...readFileSync(path, 'utf8')
-          .split(/\r?\n/)
-          .map((line) => line.trim())
-          .filter((line) => line && !line.startsWith('#')),
-      );
+      for (const raw of readFileSync(path, 'utf8')
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => line && !line.startsWith('#'))) {
+        const negated = raw.startsWith('!');
+        const pattern = negated ? raw.slice(1) : raw;
+        if (!pattern) continue;
+        const directoryOnly = pattern.endsWith('/');
+        const clean = pattern.replace(/^\//, '').replace(/\/$/, '');
+        patterns.push({
+          negated,
+          directoryOnly,
+          regex: new RegExp(
+            `^(?:.*/)?${clean
+              .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+              .replace(/\*\*/g, '§§')
+              .replace(/\*/g, '[^/]*')
+              .replace(/§§/g, '.*')}(?:/.*)?$`,
+          ),
+        });
+      }
     }
     return patterns;
   }
@@ -143,24 +171,12 @@ export class ProjectDiscovery {
   #ignored(
     path: string,
     directory: boolean,
-    patterns: readonly string[],
+    patterns: readonly IgnorePattern[],
   ): boolean {
     let ignored = false;
-    for (const raw of patterns) {
-      const negated = raw.startsWith('!');
-      const pattern = negated ? raw.slice(1) : raw;
-      if (!pattern) continue;
-      const directoryOnly = pattern.endsWith('/');
-      if (directoryOnly && !directory) continue;
-      const clean = pattern.replace(/^\//, '').replace(/\/$/, '');
-      const regex = new RegExp(
-        `^(?:.*/)?${clean
-          .replace(/[.+^${}()|[\]\\]/g, '\\$&')
-          .replace(/\*\*/g, '§§')
-          .replace(/\*/g, '[^/]*')
-          .replace(/§§/g, '.*')}(?:/.*)?$`,
-      );
-      if (regex.test(path)) ignored = !negated;
+    for (const pattern of patterns) {
+      if (pattern.directoryOnly && !directory) continue;
+      if (pattern.regex.test(path)) ignored = !pattern.negated;
     }
     return ignored;
   }

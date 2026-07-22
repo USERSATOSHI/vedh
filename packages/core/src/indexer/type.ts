@@ -12,7 +12,6 @@ export interface IndexProjectOptions {
   schemaVersion?: string;
   commitHash?: string;
   workspacePackages?: Readonly<Record<string, string>>;
-  sourceInlineMaxLines?: number;
   onProgress?: (progress: IndexProgress) => void;
 }
 export interface IndexProgress {

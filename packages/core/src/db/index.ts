@@ -10,8 +10,6 @@ import type {
   ProjectConfig,
 } from './type.js';
 
-export const DEFAULT_SOURCE_INLINE_MAX_LINES = 40;
-
 export class CoreDatabase implements CoreDatabaseContract {
   readonly #database: Database.Database;
   readonly #databasePath: string;

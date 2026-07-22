@@ -13,7 +13,6 @@ export interface CoreDatabaseOptions {
 export interface ProjectConfig {
   local?: boolean;
   dbPath?: string;
-  sourceInlineMaxLines?: number;
   /** Optional named path globs used by deterministic domain detection. */
   domains?: Record<string, string[]>;
 }
